@@ -1,0 +1,26 @@
+name: Build macOS app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build and verify app
+        run: ./scripts/build-macos-app.sh "$RUNNER_TEMP/SkillDock.app"
+      - name: Package app
+        run: ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/SkillDock.app" "$RUNNER_TEMP/SkillDock-macOS-arm64.zip"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: SkillDock-macOS-arm64
+          path: ${{ runner.temp }}/SkillDock-macOS-arm64.zip
+          retention-days: 14
