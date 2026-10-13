@@ -65,8 +65,15 @@ SkillDock 从包含 `SKILL.md` 的文件夹中发现技能。
 | --- | --- |
 | `native/SkillDockApp.swift` | SwiftUI 界面、发现和管理技能 |
 | `native/SkillOpenService.swift` | 原生应用打开操作 |
+| `native/SkillFileSafety.swift` | 文件系统身份与元数据读取 |
 | `scripts/build-macos-app.sh` | 构建和签名应用包 |
 | `scripts/generate-app-icon.swift` | 生成应用图标 |
+
+运行文件操作和元数据检查：
+
+```sh
+./tests/run-security-tests.sh
+```
 
 重新生成图标资源：
 

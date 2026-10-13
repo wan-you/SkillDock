@@ -206,9 +206,24 @@ private struct SkillItem: Identifiable, Hashable {
     let downstreamReferences: [String]
     var defaultAgent: AgentKind? = nil
     var modifiedAt: Date = .distantPast
+    var filesystemSnapshot: SkillFilesystemSnapshot? = nil
 
     var isDefault: Bool { defaultAgent != nil }
     var displayDescription: String { description.isEmpty ? L10n.text("可在本机分享的技能。", "Local skill available to share.") : description }
+}
+
+private struct SkillFilesystemSnapshot: Hashable {
+    let item: SkillFileIdentity
+    let parent: SkillFileIdentity
+    let parentPath: String
+
+    static func capture(at path: URL) -> SkillFilesystemSnapshot? {
+        let lexicalPath = path.standardizedFileURL
+        let parentPath = lexicalPath.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
+        guard let item = SkillFileIdentity.identity(at: lexicalPath),
+              let parent = SkillFileIdentity.identity(at: parentPath), parent.isDirectory else { return nil }
+        return SkillFilesystemSnapshot(item: item, parent: parent, parentPath: parentPath.path)
+    }
 }
 
 private struct DefaultSkillSource {
@@ -245,22 +260,24 @@ private enum DefaultSkillCatalog {
         func children(_ root: URL) -> [URL] {
             (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
         }
-        var manifests: [(root: URL, updated: Double, skills: [[String: Any]])] = []
+        var latest: (root: URL, updated: Double, skills: [[String: Any]])?
         // Claude keeps one generated plugin per local session/account. The
         // newest valid manifest is authoritative; its plugin also contains user
         // skills, so classification must use each entry's creatorType.
         for account in children(cache) {
             for session in children(account) {
-                guard let data = try? Data(contentsOf: session.appending(path: "manifest.json")),
+                guard let data = SkillFileSafety.completeManifest(at: session.appending(path: "manifest.json")),
                       let manifest = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                       let updated = manifest["lastUpdated"] as? NSNumber,
                       let entries = manifest["skills"] as? [[String: Any]] else { continue }
                 let root = session.appending(path: "skills", directoryHint: .isDirectory)
                 guard (try? root.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
-                manifests.append((root, updated.doubleValue, entries))
+                if latest == nil || updated.doubleValue > latest!.updated {
+                    latest = (root, updated.doubleValue, entries)
+                }
             }
         }
-        guard let latest = manifests.max(by: { $0.updated < $1.updated }) else { return nil }
+        guard let latest else { return nil }
         let allowed = Set(latest.skills.compactMap { entry -> String? in
             guard entry["creatorType"] as? String == "anthropic",
                   let name = entry["name"] as? String, !name.isEmpty,
@@ -412,6 +429,7 @@ private final class SkillStore: ObservableObject {
     @Published var lastScan = Date()
     private var timer: AnyCancellable?
     private let defaults: UserDefaults
+    private var protectedSkillRoots: [URL] = []
 
     let libraryDirectory = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Application Support/SkillDock/Library", directoryHint: .isDirectory)
     let dotAgentPath = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".agent", directoryHint: .isDirectory)
@@ -449,8 +467,10 @@ private final class SkillStore: ObservableObject {
         language = AppLanguage(rawValue: defaults.string(forKey: "SkillDock.language") ?? "") ?? .simplifiedChinese
         L10n.current = language
         sortOrder = SkillSortOrder(rawValue: defaults.string(forKey: "SkillDock.sortOrder") ?? "") ?? .nameAscending
-        try? FileManager.default.createDirectory(at: libraryDirectory, withIntermediateDirectories: true)
         refresh()
+        if !isProtectedLocation(libraryDirectory) {
+            try? FileManager.default.createDirectory(at: libraryDirectory, withIntermediateDirectories: true)
+        }
         selectedSkillID = skills.first(where: { $0.origin == .library })?.id ?? skills.first(where: { !$0.isDefault })?.id
         timer = Timer.publish(every: 12, on: .main, in: .common).autoconnect().sink { [weak self] _ in
             Task { @MainActor in self?.refresh() }
@@ -573,11 +593,13 @@ private final class SkillStore: ObservableObject {
     }
 
     func transfer(_ skill: SkillItem, to kind: AgentKind, mode: TransferMode? = nil) {
+        guard snapshotMatches(skill) else { showChangedSkillNotice(); return }
         let mode = mode ?? transferMode
         let destinationRoot = kind.skillDirectory
         let destination = destinationRoot.appending(path: skill.path.lastPathComponent, directoryHint: .isDirectory)
         let fm = FileManager.default
         do {
+            guard writableDestinationRoot(destinationRoot) else { return }
             if isInstalled(skill, in: kind) {
                 let sharedNamePath = sharedDirectory.appending(path: skill.path.lastPathComponent, directoryHint: .isDirectory)
                 let alreadyShared = (kind == .codex || kind == .deepseek) && fm.fileExists(atPath: sharedNamePath.path)
@@ -588,6 +610,7 @@ private final class SkillStore: ObservableObject {
                 return
             }
             try fm.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+            guard writableDestinationRoot(destinationRoot) else { return }
             guard !fm.fileExists(atPath: destination.path) else {
                 showNotice(L10n.text("\(skill.name) 已存在于 \(kind.title) 的技能目录", "\(skill.name) already exists in \(kind.title)’s skills folder"), style: .warning)
                 return
@@ -608,10 +631,13 @@ private final class SkillStore: ObservableObject {
     }
 
     func copyToLibrary(_ skill: SkillItem, mode: TransferMode = .copy) {
+        guard snapshotMatches(skill) else { showChangedSkillNotice(); return }
         let destination = libraryDirectory.appending(path: skill.path.lastPathComponent, directoryHint: .isDirectory)
         let fm = FileManager.default
         do {
+            guard writableDestinationRoot(libraryDirectory) else { return }
             try fm.createDirectory(at: libraryDirectory, withIntermediateDirectories: true)
+            guard writableDestinationRoot(libraryDirectory) else { return }
             guard !fm.fileExists(atPath: destination.path) else {
                 showNotice(L10n.text("\(skill.name) 已存在于 SkillDock Library", "\(skill.name) already exists in SkillDock Library"), style: .warning)
                 return
@@ -642,7 +668,8 @@ private final class SkillStore: ObservableObject {
     private func directSkillRoot(for skill: SkillItem) -> URL? {
         let path = skill.path.standardizedFileURL
         let parent = path.deletingLastPathComponent().standardizedFileURL
-        guard path.lastPathComponent != "." && path.lastPathComponent != ".." else { return nil }
+        guard path.lastPathComponent != "." && path.lastPathComponent != "..",
+              !manageableSkillRoots.contains(path) else { return nil }
         return manageableSkillRoots.first(where: { $0 == parent })
     }
 
@@ -653,31 +680,70 @@ private final class SkillStore: ObservableObject {
         }
     }
 
+    private func snapshotMatches(_ skill: SkillItem) -> Bool {
+        guard let snapshot = skill.filesystemSnapshot,
+              let current = SkillFilesystemSnapshot.capture(at: skill.path) else { return false }
+        return snapshot == current
+    }
+
+    private func isProtectedLocation(_ url: URL) -> Bool {
+        let candidate = SkillFileSafety.canonicalLocation(at: url).path
+        return protectedSkillRoots.contains { root in
+            let protectedPath = SkillFileSafety.canonicalLocation(at: root).path
+            return candidate == protectedPath || candidate.hasPrefix(protectedPath + "/")
+        }
+    }
+
+    private func managedSkillState(for skill: SkillItem) -> SkillFilesystemSnapshot? {
+        guard isLocalOrigin(skill.origin), directSkillRoot(for: skill) != nil,
+              let scanned = skill.filesystemSnapshot,
+              let live = SkillFilesystemSnapshot.capture(at: skill.path), scanned == live,
+              live.item.isDirectory || live.item.isSymbolicLink,
+              !isProtectedLocation(URL(fileURLWithPath: live.parentPath, isDirectory: true)) else { return nil }
+        // A leaf link can be unlinked, while a root alias must retain the
+        // read-only policy of the directory it points into.
+        if !live.item.isSymbolicLink && isProtectedLocation(skill.path) { return nil }
+        return live
+    }
+
+    private func showChangedSkillNotice() {
+        showNotice(L10n.text("技能目录已变化，请重新扫描后再操作", "The skill folder has changed. Rescan before trying again."), style: .warning)
+    }
+
+    private func writableDestinationRoot(_ root: URL) -> Bool {
+        guard !isProtectedLocation(root) else {
+            showNotice(L10n.text("目标目录指向只读技能来源，无法写入", "The destination points to a read-only skill source and cannot be changed."), style: .warning)
+            return false
+        }
+        return true
+    }
+
     func canArchive(_ skill: SkillItem) -> Bool {
         guard isLocalOrigin(skill.origin), skill.origin != .archived,
               !skill.isSymbolicLink, !skill.isManagedSync, !skill.isDefault else { return false }
-        return directSkillRoot(for: skill) != nil
+        return managedSkillState(for: skill)?.item.isDirectory == true
     }
 
     func canDelete(_ skill: SkillItem) -> Bool {
         guard isLocalOrigin(skill.origin), skill.origin != .shared,
               !skill.isManagedSync, !skill.isDefault else { return false }
-        return directSkillRoot(for: skill) != nil
+        return managedSkillState(for: skill) != nil
     }
 
     func managementHint(for skill: SkillItem) -> String {
         if skill.isDefault { return L10n.text("这是 Agent 自带的默认技能，由 Agent 管理；可以复制到 Library 后单独管理。", "This built-in skill is managed by its Agent. Copy it to Library to manage an independent version.") }
         if skill.origin == .shared { return L10n.text("Shared 技能由 Codex / DeepSeek 自动读取，请先复制到 Library。", "Shared skills are loaded automatically by Codex / DeepSeek. Copy this skill to Library to manage it.") }
         if skill.isManagedSync { return L10n.text("Claude synced 技能由 Claude 管理，不能在这里改动。", "Claude manages its synced skills. They are read-only here.") }
-        if skill.origin == .archived { return L10n.text("这是归档技能，可以永久删除。", "This archived skill can be permanently deleted.") }
-        if !isLocalOrigin(skill.origin) || directSkillRoot(for: skill) == nil {
+        if !isLocalOrigin(skill.origin) || directSkillRoot(for: skill) == nil || managedSkillState(for: skill) == nil {
             return L10n.text("此来源只读，不能在这里归档或删除。", "This source is read-only and cannot be archived or deleted here.")
         }
+        if skill.origin == .archived { return L10n.text("这是归档技能，可以永久删除。", "This archived skill can be permanently deleted.") }
         if skill.isSymbolicLink { return L10n.text("这是 Agent 中的链接，只能删除链接，不能归档源目录。", "This is a link in an Agent folder. You can remove the link; its source cannot be archived here.") }
         return ""
     }
 
     func archive(_ skill: SkillItem) {
+        guard snapshotMatches(skill) else { showChangedSkillNotice(); return }
         guard canArchive(skill) else {
             showNotice(L10n.text("该技能来源不支持归档", "This skill source cannot be archived"), style: .warning)
             return
@@ -685,7 +751,9 @@ private final class SkillStore: ObservableObject {
         let fm = FileManager.default
         let destination = archivedDirectory.appending(path: skill.path.lastPathComponent, directoryHint: .isDirectory)
         do {
+            guard writableDestinationRoot(archivedDirectory) else { return }
             try fm.createDirectory(at: archivedDirectory, withIntermediateDirectories: true)
+            guard writableDestinationRoot(archivedDirectory) else { return }
             guard !fm.fileExists(atPath: destination.path) else {
                 showNotice(L10n.text("归档区已有同名技能：\(skill.name)", "An archived skill already has this name: \(skill.name)"), style: .warning)
                 return
@@ -700,6 +768,7 @@ private final class SkillStore: ObservableObject {
     }
 
     func delete(_ skill: SkillItem) {
+        guard snapshotMatches(skill) else { showChangedSkillNotice(); return }
         guard canDelete(skill) else {
             showNotice(L10n.text("该技能来源不支持删除", "This skill source cannot be deleted"), style: .warning)
             return
@@ -881,6 +950,10 @@ private final class SkillStore: ObservableObject {
         ]
         roots.append(contentsOf: additional.map { ($0, .other) })
         roots.append(contentsOf: defaults.map { ($0.root, .agent($0.agent)) })
+        protectedSkillRoots = [sharedDirectory,
+            AgentKind.claude.skillDirectory.appending(path: "synced", directoryHint: .isDirectory),
+            home.appending(path: "Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin", directoryHint: .isDirectory)]
+            + additional + defaults.map { $0.root }
 
         var results: [SkillItem] = []
         var seen = Set<String>()
@@ -901,17 +974,19 @@ private final class SkillStore: ObservableObject {
                 let relativeName = parsed.name ?? folder.lastPathComponent
                 let name = relativeName.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " ")
                 let count = (try? fm.contentsOfDirectory(at: resolved, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]).count) ?? 1
-                let resource = try? folder.resourceValues(forKeys: [.isSymbolicLinkKey])
+                guard let snapshot = SkillFilesystemSnapshot.capture(at: folder),
+                      snapshot.item.isDirectory || snapshot.item.isSymbolicLink else { continue }
                 let syncedRoot = AgentKind.claude.skillDirectory.appending(path: "synced", directoryHint: .isDirectory).standardizedFileURL.path
                 let managedSync = origin == .agent(.claude) && identity.hasPrefix(syncedRoot + "/")
-                results.append(SkillItem(id: folder.standardizedFileURL.path, name: name, description: parsed.description ?? "", path: folder, origin: origin, version: parsed.version, skillCount: count, isSymbolicLink: resource?.isSymbolicLink ?? false, isManagedSync: managedSync, aliases: parsed.aliases, upstreamReferences: parsed.upstreamReferences, downstreamReferences: parsed.downstreamReferences, defaultAgent: DefaultSkillCatalog.owner(of: folder, origin: origin, sources: defaults), modifiedAt: modifiedAt))
+                results.append(SkillItem(id: folder.standardizedFileURL.path, name: name, description: parsed.description ?? "", path: folder, origin: origin, version: parsed.version, skillCount: count, isSymbolicLink: snapshot.item.isSymbolicLink, isManagedSync: managedSync, aliases: parsed.aliases, upstreamReferences: parsed.upstreamReferences, downstreamReferences: parsed.downstreamReferences, defaultAgent: DefaultSkillCatalog.owner(of: folder, origin: origin, sources: defaults), modifiedAt: modifiedAt, filesystemSnapshot: snapshot))
             }
         }
         return SkillPresentation.sorted(results, order: .source)
     }
 
     private func parseSkillMetadata(at file: URL) -> SkillMetadata {
-        guard let text = try? String(contentsOf: file, encoding: .utf8) else { return SkillMetadata() }
+        guard let data = SkillFileSafety.metadataPrefix(at: file) else { return SkillMetadata() }
+        let text = String(decoding: data, as: UTF8.self)
         var metadata = SkillMetadata()
         var inFrontmatter = false
         var sawOpening = false

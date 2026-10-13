@@ -65,8 +65,15 @@ Skills are discovered from folders containing `SKILL.md`.
 | --- | --- |
 | `native/SkillDockApp.swift` | SwiftUI interface, discovery, and skill management |
 | `native/SkillOpenService.swift` | Native application opening |
+| `native/SkillFileSafety.swift` | Filesystem identities and metadata reading |
 | `scripts/build-macos-app.sh` | App bundle build and signing |
 | `scripts/generate-app-icon.swift` | App icon generation |
+
+Run the file operation and metadata checks:
+
+```sh
+./tests/run-security-tests.sh
+```
 
 Regenerate the icon assets:
 
