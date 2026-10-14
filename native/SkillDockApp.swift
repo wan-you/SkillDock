@@ -1122,6 +1122,7 @@ private struct ContentView: View {
                         Label(option.title, systemImage: option.symbol).tag(option)
                     }
                 }
+                .pickerStyle(.inline).labelsHidden()
             } label: {
                 Label(L10n.text("外观", "Appearance"), systemImage: appearance.symbol)
                     .font(.system(size: 13, weight: .medium)).foregroundStyle(Palette.secondary)
@@ -1133,6 +1134,7 @@ private struct ContentView: View {
                 Picker(L10n.text("语言", "Language"), selection: $store.language) {
                     ForEach(AppLanguage.allCases) { language in Text(language.title).tag(language) }
                 }
+                .pickerStyle(.inline).labelsHidden()
             } label: {
                 Label(L10n.text("语言", "Language"), systemImage: "character.bubble")
                     .font(.system(size: 13, weight: .medium)).foregroundStyle(Palette.secondary)
@@ -1447,6 +1449,7 @@ private struct SkillSortMenu: View {
             Picker(L10n.text("排序方式", "Sort order"), selection: $store.sortOrder) {
                 ForEach(SkillSortOrder.allCases) { order in Text(order.title).tag(order) }
             }
+            .pickerStyle(.inline).labelsHidden()
         } label: {
             Label(store.sortOrder.title, systemImage: "arrow.up.arrow.down")
                 .font(.system(size: 12, weight: .medium)).foregroundStyle(Palette.secondary)
