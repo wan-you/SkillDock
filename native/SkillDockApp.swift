@@ -75,13 +75,14 @@ private enum AppAppearance: String, CaseIterable, Identifiable {
 }
 
 private enum AgentKind: String, CaseIterable, Identifiable {
-    case codex, claude, deepseek
+    case codex, claude, deepseek, mirasim
     var id: String { rawValue }
     var title: String {
         switch self {
         case .codex: "Codex"
         case .claude: "Claude Desktop"
         case .deepseek: "DeepSeek Harness"
+        case .mirasim: "Mirasim"
         }
     }
     var subtitle: String {
@@ -89,6 +90,7 @@ private enum AgentKind: String, CaseIterable, Identifiable {
         case .codex: "OpenAI"
         case .claude: "Anthropic"
         case .deepseek: "DeepSeek"
+        case .mirasim: L10n.text("本地 Agent", "Local Agent")
         }
     }
     var symbol: String {
@@ -96,6 +98,7 @@ private enum AgentKind: String, CaseIterable, Identifiable {
         case .codex: "hexagon"
         case .claude: "sparkle"
         case .deepseek: "waveform.path"
+        case .mirasim: "circle.hexagongrid"
         }
     }
     var accent: Color {
@@ -103,6 +106,7 @@ private enum AgentKind: String, CaseIterable, Identifiable {
         case .codex: Palette.mint
         case .claude: Palette.claude
         case .deepseek: Palette.blue
+        case .mirasim: Palette.amber
         }
     }
     var preferredBundleID: String {
@@ -110,6 +114,7 @@ private enum AgentKind: String, CaseIterable, Identifiable {
         case .codex: "com.openai.codex"
         case .claude: "com.anthropic.claudefordesktop"
         case .deepseek: "com.deepseek.dsh"
+        case .mirasim: "ai.mirofish.mirasim"
         }
     }
     var bundleIDs: Set<String> {
@@ -117,6 +122,7 @@ private enum AgentKind: String, CaseIterable, Identifiable {
         case .codex: ["com.openai.codex", "com.openai.chat"]
         case .claude: ["com.anthropic.claudefordesktop", "com.anthropic.claude"]
         case .deepseek: ["com.deepseek.dsh", "com.deepseek.harness"]
+        case .mirasim: ["ai.mirofish.mirasim"]
         }
     }
     var skillDirectory: URL {
@@ -130,6 +136,7 @@ private enum AgentKind: String, CaseIterable, Identifiable {
             } else {
                 home.appending(path: ".dsh/skills", directoryHint: .isDirectory)
             }
+        case .mirasim: home.appending(path: ".mirasim/skills", directoryHint: .isDirectory)
         }
     }
     var alternateSkillDirectories: [URL] {
@@ -138,8 +145,10 @@ private enum AgentKind: String, CaseIterable, Identifiable {
         case .codex: return []
         case .claude: return [home.appending(path: ".claude/skills/synced", directoryHint: .isDirectory)]
         case .deepseek: return []
+        case .mirasim: return []
         }
     }
+    var loadsSharedSkills: Bool { self == .codex || self == .deepseek || self == .mirasim }
 }
 
 private struct InstalledAgent: Identifiable, Hashable {
@@ -150,9 +159,9 @@ private struct InstalledAgent: Identifiable, Hashable {
     var id: String { kind.id }
 
     var applicationIcon: NSImage {
-        // DeepSeek's ICNS small-size layers decode incorrectly on macOS.
-        // Its bundled PNG has the same artwork without those broken layers.
-        if kind == .deepseek,
+        // Prefer the bundled full-resolution artwork where it is available.
+        // DeepSeek's small ICNS layers decode incorrectly on macOS.
+        if kind == .deepseek || kind == .mirasim,
            let image = NSImage(contentsOf: applicationURL.appending(path: "Contents/Resources/icon.png")) {
             return image
         }
@@ -230,6 +239,11 @@ private struct DefaultSkillSource {
     let root: URL
     let agent: AgentKind
     var allowedFolders: Set<String>? = nil
+    var protectsWholeRoot = true
+
+    var protectedRoots: [URL] {
+        protectsWholeRoot ? [root] : (allowedFolders ?? []).map { root.appending(path: $0, directoryHint: .isDirectory) }
+    }
 
     func contains(_ path: URL) -> Bool {
         let folder = path.resolvingSymlinksInPath().standardizedFileURL
@@ -243,6 +257,7 @@ private enum DefaultSkillCatalog {
     static func sources(home: URL, agents: [InstalledAgent]) -> [DefaultSkillSource] {
         var sources = [DefaultSkillSource(root: home.appending(path: ".codex/skills/.system", directoryHint: .isDirectory), agent: .codex)]
         if let claude = claudeSource(home: home) { sources.append(claude) }
+        if let mirasim = mirasimSource(home: home) { sources.append(mirasim) }
         if let deepseek = agents.first(where: { $0.kind == .deepseek }) {
             sources.append(DefaultSkillSource(root: deepseek.applicationURL.appending(path: "Contents/Resources/runtime/office-skills", directoryHint: .isDirectory), agent: .deepseek))
         }
@@ -252,6 +267,23 @@ private enum DefaultSkillCatalog {
     static func owner(of folder: URL, origin: SkillOrigin, sources: [DefaultSkillSource]) -> AgentKind? {
         guard case .agent(let kind) = origin else { return nil }
         return sources.first(where: { $0.agent == kind && $0.contains(folder) })?.agent
+    }
+
+    private static func mirasimSource(home: URL) -> DefaultSkillSource? {
+        let root = home.appending(path: ".mirasim/skills", directoryHint: .isDirectory)
+        let builtInNames = ["eval", "mirasim-guide", "mirasim-operate", "mirasim-publish"]
+        let installed = Set(builtInNames.filter { name in
+            let folder = root.appending(path: name, directoryHint: .isDirectory)
+            guard SkillFileIdentity.identity(at: folder)?.isDirectory == true,
+                  let data = SkillFileSafety.completeManifest(at: folder.appending(path: ".mirasim-skill.json")),
+                  let marker = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  marker["name"] as? String == name,
+                  let fingerprint = marker["fingerprint"] as? String,
+                  fingerprint.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else { return false }
+            return true
+        })
+        guard !installed.isEmpty else { return nil }
+        return DefaultSkillSource(root: root, agent: .mirasim, allowedFolders: installed, protectsWholeRoot: false)
     }
 
     private static func claudeSource(home: URL) -> DefaultSkillSource? {
@@ -358,8 +390,9 @@ private enum SkillPresentation {
         case .agent(.codex): 3
         case .agent(.claude): 4
         case .agent(.deepseek): 5
-        case .archived: 6
-        case .other: 7
+        case .agent(.mirasim): 6
+        case .archived: 7
+        case .other: 8
         }
     }
 
@@ -527,7 +560,7 @@ private final class SkillStore: ObservableObject {
         let localRoots = [kind.skillDirectory] + kind.alternateSkillDirectories
         let localPaths = Set(localRoots.map { $0.standardizedFileURL.path })
         let sharedPath = sharedDirectory.standardizedFileURL.path
-        let includesShared = kind == .codex || kind == .deepseek
+        let includesShared = kind.loadsSharedSkills
         let candidates = skills.filter { skill in
             let path = skill.path.standardizedFileURL.path
             let parent = skill.path.deletingLastPathComponent().standardizedFileURL.path
@@ -583,8 +616,8 @@ private final class SkillStore: ObservableObject {
 
     func isInstalled(_ item: SkillItem, in kind: AgentKind) -> Bool {
         if item.defaultAgent == kind { return true }
-        if item.origin == .shared && (kind == .codex || kind == .deepseek) { return true }
-        if kind == .codex || kind == .deepseek {
+        if item.origin == .shared && kind.loadsSharedSkills { return true }
+        if kind.loadsSharedSkills {
             let sharedNamePath = sharedDirectory.appending(path: item.path.lastPathComponent, directoryHint: .isDirectory)
             if FileManager.default.fileExists(atPath: sharedNamePath.path) { return true }
         }
@@ -602,7 +635,7 @@ private final class SkillStore: ObservableObject {
             guard writableDestinationRoot(destinationRoot) else { return }
             if isInstalled(skill, in: kind) {
                 let sharedNamePath = sharedDirectory.appending(path: skill.path.lastPathComponent, directoryHint: .isDirectory)
-                let alreadyShared = (kind == .codex || kind == .deepseek) && fm.fileExists(atPath: sharedNamePath.path)
+                let alreadyShared = kind.loadsSharedSkills && fm.fileExists(atPath: sharedNamePath.path)
                 let message = alreadyShared
                     ? L10n.text("\(skill.name) 已通过 Shared 对 \(kind.title) 可用", "\(skill.name) is available to \(kind.title) through Shared")
                     : L10n.text("\(skill.name) 已存在于 \(kind.title) 的技能目录", "\(skill.name) already exists in \(kind.title)’s skills folder")
@@ -652,6 +685,98 @@ private final class SkillStore: ObservableObject {
         } catch {
             showNotice(L10n.text("无法更新 SkillDock Library：\(error.localizedDescription)", "Could not update SkillDock Library: \(error.localizedDescription)"), style: .error)
         }
+    }
+
+    @discardableResult
+    func promoteToShared(_ skill: SkillItem) -> Bool {
+        guard snapshotMatches(skill) else { showChangedSkillNotice(); return false }
+        let fm = FileManager.default
+        let source = skill.path.resolvingSymlinksInPath().standardizedFileURL
+        let sharedRoot = SkillFileSafety.canonicalLocation(at: sharedDirectory)
+        if skill.origin == .shared || source.path.hasPrefix(sharedRoot.path + "/") {
+            showNotice(L10n.text("\(skill.name) 已是共享全局技能", "\(skill.name) is already a shared global skill"), style: .warning)
+            return false
+        }
+        let destination = sharedDirectory.appending(path: skill.path.lastPathComponent, directoryHint: .isDirectory)
+        // Stage an independent directory copy, including when the dragged item
+        // is a leaf link. Only a completed copy receives its public skill name.
+        let staging = sharedDirectory.appending(path: ".skilldock-\(UUID().uuidString)", directoryHint: .isDirectory)
+        var stagingIdentity: SkillFileIdentity?
+        defer {
+            if let stagingIdentity, SkillFileIdentity.identity(at: staging) == stagingIdentity {
+                try? fm.removeItem(at: staging)
+            }
+        }
+        do {
+            guard writableSharedRoot() else { return false }
+            guard SkillFileIdentity.identity(at: source)?.isDirectory == true,
+                  SkillFileSafety.metadataPrefix(at: source.appending(path: "SKILL.md")) != nil else {
+                showNotice(L10n.text("无法将此来源设为全局技能，请检查技能目录", "This source cannot be made global. Check its skill folder."), style: .warning)
+                return false
+            }
+            let containerRoots = manageableSkillRoots + (skill.isDefault ? [] : protectedSkillRoots)
+            let sourceIsContainer = containerRoots.contains {
+                SkillFileSafety.canonicalLocation(at: $0).path == source.path
+            }
+            guard !sourceIsContainer, sharedRoot.path != source.path, !sharedRoot.path.hasPrefix(source.path + "/") else {
+                showNotice(L10n.text("技能来源与全局目录重叠，无法复制", "The source overlaps the global skills folder and cannot be copied."), style: .warning)
+                return false
+            }
+            guard SkillFileIdentity.identity(at: destination) == nil else {
+                showNotice(L10n.text("共享全局已有同名技能：\(skill.name)", "A shared global skill already has this name: \(skill.name)"), style: .warning)
+                return false
+            }
+            try fm.createDirectory(at: sharedDirectory, withIntermediateDirectories: true)
+            guard writableSharedRoot(), snapshotMatches(skill),
+                  SkillFileSafety.canonicalLocation(at: sharedDirectory).path == sharedRoot.path else {
+                showChangedSkillNotice()
+                return false
+            }
+            do {
+                try fm.copyItem(at: source, to: staging)
+            } catch {
+                stagingIdentity = SkillFileIdentity.identity(at: staging)
+                throw error
+            }
+            stagingIdentity = SkillFileIdentity.identity(at: staging)
+            guard writableSharedRoot(), snapshotMatches(skill),
+                  SkillFileSafety.canonicalLocation(at: sharedDirectory).path == sharedRoot.path else {
+                showChangedSkillNotice()
+                return false
+            }
+            guard SkillFileIdentity.identity(at: destination) == nil else {
+                showNotice(L10n.text("共享全局已有同名技能：\(skill.name)", "A shared global skill already has this name: \(skill.name)"), style: .warning)
+                return false
+            }
+            try fm.moveItem(at: staging, to: destination)
+            refresh()
+            selectedSkillID = destination.standardizedFileURL.path
+            if filter == .agent || filter == .library {
+                filter = .global
+            }
+            if let selectedSkill, !SkillPresentation.matches(selectedSkill, query: searchText) { searchText = "" }
+            showNotice(L10n.text("\(skill.name) 已设为全局技能，原技能已保留", "\(skill.name) is now a global skill. The original was kept."), style: .success)
+            return true
+        } catch {
+            showNotice(L10n.text("无法设为全局技能：\(error.localizedDescription)", "Could not make the skill global: \(error.localizedDescription)"), style: .error)
+            return false
+        }
+    }
+
+    private func writableSharedRoot() -> Bool {
+        // Shared remains read-only to generic transfers and management actions.
+        // Only this promotion path may add a new entry to its dedicated root.
+        let shared = SkillFileSafety.canonicalLocation(at: sharedDirectory).path
+        let otherRoots = protectedSkillRoots.filter { $0.standardizedFileURL != sharedDirectory.standardizedFileURL } + manageableSkillRoots
+        let overlaps = otherRoots.contains {
+            let other = SkillFileSafety.canonicalLocation(at: $0).path
+            return shared == other || shared.hasPrefix(other + "/") || other.hasPrefix(shared + "/")
+        }
+        guard !overlaps else {
+            showNotice(L10n.text("共享全局与其他技能目录重叠，无法写入", "Shared global overlaps another skill location and cannot be changed."), style: .warning)
+            return false
+        }
+        return true
     }
 
     private var manageableSkillRoots: [URL] {
@@ -732,7 +857,7 @@ private final class SkillStore: ObservableObject {
 
     func managementHint(for skill: SkillItem) -> String {
         if skill.isDefault { return L10n.text("这是 Agent 自带的默认技能，由 Agent 管理；可以复制到 Library 后单独管理。", "This built-in skill is managed by its Agent. Copy it to Library to manage an independent version.") }
-        if skill.origin == .shared { return L10n.text("Shared 技能由 Codex / DeepSeek 自动读取，请先复制到 Library。", "Shared skills are loaded automatically by Codex / DeepSeek. Copy this skill to Library to manage it.") }
+        if skill.origin == .shared { return L10n.text("Shared 技能供 Codex / DeepSeek / Mirasim 读取，请先复制到 Library。", "Shared skills are available to Codex / DeepSeek / Mirasim. Copy this skill to Library to manage it.") }
         if skill.isManagedSync { return L10n.text("Claude synced 技能由 Claude 管理，不能在这里改动。", "Claude manages its synced skills. They are read-only here.") }
         if !isLocalOrigin(skill.origin) || directSkillRoot(for: skill) == nil || managedSkillState(for: skill) == nil {
             return L10n.text("此来源只读，不能在这里归档或删除。", "This source is read-only and cannot be archived or deleted here.")
@@ -825,10 +950,9 @@ private final class SkillStore: ObservableObject {
             if candidate.downstreamReferences.contains(where: { resolve($0, using: aliasMap).contains(where: { $0.id == skill.id }) }) { addUpstream(candidate) }
         }
 
-        // ~/.agents/skills is loaded automatically by these two agents.
+        // These agents can use skills directly from ~/.agents/skills.
         if skill.origin == .shared {
-            if agents.contains(where: { $0.kind == .codex }) { addDownstreamAgent(.codex) }
-            if agents.contains(where: { $0.kind == .deepseek }) { addDownstreamAgent(.deepseek) }
+            for agent in agents where agent.kind.loadsSharedSkills { addDownstreamAgent(agent.kind) }
         }
         if let owner = skill.defaultAgent, agents.contains(where: { $0.kind == owner }) {
             addDownstreamAgent(owner, detail: L10n.text("自带默认技能", "Built-in skill"))
@@ -953,14 +1077,14 @@ private final class SkillStore: ObservableObject {
         protectedSkillRoots = [sharedDirectory,
             AgentKind.claude.skillDirectory.appending(path: "synced", directoryHint: .isDirectory),
             home.appending(path: "Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin", directoryHint: .isDirectory)]
-            + additional + defaults.map { $0.root }
+            + additional + defaults.flatMap { $0.protectedRoots }
 
         var results: [SkillItem] = []
         var seen = Set<String>()
         for (root, origin) in roots {
             guard let children = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) else { continue }
             for folder in children {
-                if let source = defaults.first(where: { $0.root.standardizedFileURL == root.standardizedFileURL }),
+                if let source = defaults.first(where: { $0.protectsWholeRoot && $0.root.standardizedFileURL == root.standardizedFileURL }),
                    let allowed = source.allowedFolders, !allowed.contains(folder.lastPathComponent) { continue }
                 var isDirectory: ObjCBool = false
                 guard fm.fileExists(atPath: folder.path, isDirectory: &isDirectory), isDirectory.boolValue else { continue }
@@ -1187,20 +1311,23 @@ private struct ContentView: View {
             .padding(.horizontal, 15).padding(.top, 22).padding(.bottom, 11)
 
             if store.agents.isEmpty {
-                ContentUnavailableView(L10n.text("未发现 Agent", "No Agents found"), systemImage: "app.dashed", description: Text(L10n.text("安装 Codex、Claude Desktop 或 DeepSeek Harness 后，重新扫描即可。", "Install Codex, Claude Desktop, or DeepSeek Harness, then rescan.")))
-                    .padding(12)
+                ContentUnavailableView(L10n.text("未发现 Agent", "No Agents found"), systemImage: "app.dashed", description: Text(L10n.text("安装 Codex、Claude Desktop、DeepSeek Harness 或 Mirasim 后，重新扫描即可。", "Install Codex, Claude Desktop, DeepSeek Harness, or Mirasim, then rescan.")))
+                    .padding(12).frame(maxHeight: .infinity)
             } else {
-                VStack(spacing: 5) {
-                    ForEach(store.agents) { agent in
-                        AgentSidebarRow(agent: agent, selected: store.selectedAgent?.id == agent.id, skillCount: store.skillCount(for: agent.kind)) {
-                            withAnimation(.snappy(duration: 0.23)) { store.selectedAgentID = agent.id; store.selectedSkillID = nil }
+                ScrollView {
+                    VStack(spacing: 5) {
+                        ForEach(store.agents) { agent in
+                            AgentSidebarRow(agent: agent, selected: store.selectedAgent?.id == agent.id, skillCount: store.skillCount(for: agent.kind)) {
+                                withAnimation(.snappy(duration: 0.23)) { store.selectedAgentID = agent.id; store.selectedSkillID = nil }
+                            }
                         }
                     }
+                    .padding(.horizontal, 9)
                 }
-                .padding(.horizontal, 9)
+                .frame(minHeight: 60, maxHeight: .infinity)
             }
 
-            Spacer(minLength: 20)
+            Spacer().frame(height: 20)
             VStack(alignment: .leading, spacing: 10) {
                 Text(L10n.text("技能目录", "SKILL LOCATIONS")).font(.system(size: 11, weight: .bold, design: .monospaced)).tracking(1.1).foregroundStyle(Palette.muted)
                 PathRow(symbol: "square.stack.3d.up", label: "Library", path: "~/Library/.../SkillDock/Library", onDrop: { id in
@@ -1208,7 +1335,11 @@ private struct ContentView: View {
                     store.copyToLibrary(skill)
                     return true
                 })
-                PathRow(symbol: "globe.americas.fill", label: L10n.text("共享全局", "Shared global"), path: L10n.text("~/.agents/skills · \(store.sharedSkillCount) 个", "~/.agents/skills · \(store.sharedSkillCount)"))
+                PathRow(symbol: "globe.americas.fill", label: L10n.text("共享全局", "Shared global"), path: L10n.text("~/.agents/skills · \(store.sharedSkillCount) 个", "~/.agents/skills · \(store.sharedSkillCount)"), onDrop: { id in
+                    guard let skill = store.skills.first(where: { $0.id == id }) else { return false }
+                    return store.promoteToShared(skill)
+                })
+                .help(L10n.text("拖入技能设为全局：复制到 ~/.agents/skills 并保留原技能", "Drop a skill to make it global: copy to ~/.agents/skills and keep the original"))
                 HStack(spacing: 7) {
                     Image(systemName: "folder.badge.questionmark").font(.system(size: 13)).foregroundStyle(Palette.amber).frame(width: 14)
                     VStack(alignment: .leading, spacing: 2) {
@@ -1232,7 +1363,7 @@ private struct ContentView: View {
                     return true
                 })
                 if let agent = store.selectedAgent { PathRow(symbol: agent.kind.symbol, label: agent.kind.title, path: "~" + agent.kind.skillDirectory.path.dropFirst(FileManager.default.homeDirectoryForCurrentUser.path.count)) }
-                Text(L10n.text("Shared、~/.agent 与归档技能会清晰标记；拖到 Library 收纳，拖到 Agent 选择链接或复制。", "Shared, ~/.agent, and archived skills are labeled. Drag to Library to collect skills, or to an Agent to link or copy them."))
+                Text(L10n.text("拖到共享全局设为全局技能；拖到 Library 收纳，拖到 Agent 分配。", "Drag to Shared global to make skills global, to Library to collect them, or to an Agent to assign them."))
                     .font(.system(size: 12)).foregroundStyle(Palette.muted).fixedSize(horizontal: false, vertical: true).padding(.top, 3)
             }
             .padding(13)
@@ -1312,7 +1443,7 @@ private struct ContentView: View {
 
             HStack(spacing: 7) {
                 Image(systemName: "info.circle").foregroundStyle(Palette.muted)
-                Text(L10n.text("技能通过 SKILL.md 识别 · Shared 会被 Codex / DeepSeek 自动读取", "Skills use SKILL.md · Codex / DeepSeek load Shared automatically")).foregroundStyle(Palette.muted)
+                Text(L10n.text("技能通过 SKILL.md 识别 · Codex / DeepSeek / Mirasim 可用 Shared", "Skills use SKILL.md · Shared is available to Codex / DeepSeek / Mirasim")).foregroundStyle(Palette.muted)
                 Spacer()
                 Button { store.reveal(store.libraryDirectory) } label: { Image(systemName: "arrow.up.forward.app") }
                     .buttonStyle(IconButtonStyle()).help(L10n.text("在 Finder 中打开 SkillDock Library", "Show SkillDock Library in Finder"))
@@ -1503,12 +1634,14 @@ private struct PathRow: View {
     var body: some View {
         HStack(spacing: 7) {
             Image(systemName: symbol).font(.system(size: 13)).foregroundStyle(Palette.mint).frame(width: 14)
-            Text(label).font(.system(size: 12, weight: .medium)).foregroundStyle(Palette.secondary)
+            Text(label).font(.system(size: 12, weight: .medium)).foregroundStyle(Palette.secondary).fixedSize(horizontal: true, vertical: false)
             Spacer(minLength: 4)
             Text(path).font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.muted).lineLimit(1).truncationMode(.middle)
         }
-        .padding(.horizontal, 4).padding(.vertical, 3)
+        .padding(.horizontal, 4).padding(.vertical, onDrop == nil ? 3 : 7)
         .background(isTargeted ? Palette.mint.opacity(0.1) : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(isTargeted ? Palette.mint.opacity(0.65) : Color.clear, lineWidth: 1))
+        .contentShape(RoundedRectangle(cornerRadius: 6))
         .dropDestination(for: String.self) { items, _ in
             guard let onDrop, let id = items.first else { return false }
             return onDrop(id)
@@ -1616,6 +1749,7 @@ private struct SkillSourceRow: View {
         case .agent(.claude): Palette.claude
         case .agent(.deepseek): Palette.blue
         case .agent(.codex): Palette.mint
+        case .agent(.mirasim): Palette.amber
         case .other: Palette.secondary
         }
     }
@@ -2359,10 +2493,10 @@ private struct SettingsSheet: View {
             Divider().overlay(Palette.line)
             SettingsPath(label: "SkillDock Library", path: store.libraryDirectory.path)
             SettingsPath(label: L10n.text("全局 · ~/.agent", "Global · ~/.agent"), path: "\(store.dotAgentPath.path) · \(store.dotAgentStatus)")
-            SettingsPath(label: L10n.text("共享 · Codex + DeepSeek", "Shared · Codex + DeepSeek"), path: store.sharedDirectory.path)
+            SettingsPath(label: L10n.text("共享 · Codex / DeepSeek / Mirasim", "Shared · Codex / DeepSeek / Mirasim"), path: store.sharedDirectory.path)
             SettingsPath(label: L10n.text("全局归档", "Archived global"), path: store.archivedDirectory.path)
             ForEach(AgentKind.allCases) { kind in SettingsPath(label: kind.title, path: kind.skillDirectory.path) }
-            Text(L10n.text("SkillDock Library 与各 Agent 的自动读取目录分开。~/.agents/skills 会被 Codex 与 DeepSeek Harness 自动读取，因此单独标为全局 Shared。当前 ~/.agent 会被单独检查并显示状态。Codex 的单独分发目录为 ~/.codex/skills；DeepSeek 默认使用 ~/.dsh/skills。Claude Desktop 的账户技能由 Claude 管理；本地 Claude 技能目录及 synced 子目录作为本机来源展示。", "SkillDock Library is separate from each Agent’s skill folders. Codex and DeepSeek Harness automatically load ~/.agents/skills, labeled Shared global. ~/.agent is checked separately and its status is shown. Codex uses ~/.codex/skills; DeepSeek defaults to ~/.dsh/skills. Claude manages its account skills; its local skills folder and synced subfolder are shown as local sources."))
+            Text(L10n.text("拖到共享全局会复制技能到 ~/.agents/skills，供 Codex、DeepSeek Harness 和 Mirasim 使用。Library 用于集中收纳和选择性分配。Mirasim 的本地技能目录为 ~/.mirasim/skills；Codex 使用 ~/.codex/skills；DeepSeek 默认使用 ~/.dsh/skills。Claude Desktop 的本地技能及 synced 子目录作为本机来源展示。", "Drag to Shared global to copy skills into ~/.agents/skills for Codex, DeepSeek Harness, and Mirasim. Library collects skills for selective assignment. Mirasim uses ~/.mirasim/skills; Codex uses ~/.codex/skills; DeepSeek defaults to ~/.dsh/skills. Claude Desktop’s local skills and synced subfolder are shown as local sources."))
                 .font(.system(size: 12)).foregroundStyle(Palette.muted).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Text(L10n.text("当前电脑上的应用自动检测中。远端电脑需要额外的同步连接。", "Apps on this Mac are detected automatically. Remote computers require a separate sync connection."))

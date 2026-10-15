@@ -2,13 +2,14 @@
 
 [English](README.md)
 
-SkillDock 是原生 macOS Agent 技能管理器。自动发现 Codex、Claude Desktop 和 DeepSeek Harness，把技能集中到 Library，再通过拖动分配给需要它们的 Agent。
+SkillDock 是原生 macOS Agent 技能管理器。自动发现 Codex、Claude Desktop、DeepSeek Harness 和 Mirasim，把技能集中到 Library，再通过拖动分配给需要它们的 Agent。
 
 ![SkillDock](docs/images/skilldock.png)
 
 ## 功能
 
 - **拖动分享**：让多个 Agent 链接同一份技能，或创建可以独立编辑的副本。
+- **设为全局**：把技能拖到「共享全局」，复制到 `~/.agents/skills` 并保留原技能，供 Codex、DeepSeek Harness 和 Mirasim 使用。
 - **查看关系**：悬浮在技能卡片的关系按钮上，用箭头查看技能来源和下游 Agent。
 - **搜索与排序**：搜索名称、说明、别名和路径，按名称、来源或最近修改排序。自带默认技能初始收起。
 - **整理技能**：收纳到 Library，在详情栏归档或删除。
@@ -40,7 +41,7 @@ open "$HOME/Desktop/SkillDock.app"
 
 1. 在侧栏选择 Agent，查看它的技能。
 2. 把技能拖到 Agent 或其技能列表。选择「创建链接」共享技能文件，或「复制独立副本」单独编辑。
-3. 把技能拖到「Library」集中收纳，再选择性分配给 Agent。把可归档的技能拖到「归档」即可归档。
+3. 把技能拖到「共享全局」设为全局技能，已有同名目录时保留原有内容。拖到「Library」集中收纳并选择性分配，拖到「归档」即可归档。
 4. 选择技能查看详情和管理操作。点击「打开」，或右键卡片，选择打开它的应用。
 
 按 **⌘F** 搜索，按 **Esc** 清空搜索。列表上的排序菜单和顶部的「外观」「语言」菜单用于切换视图；排序、外观和语言选择会被保存。
@@ -52,12 +53,13 @@ SkillDock 从包含 `SKILL.md` 的文件夹中发现技能。
 | 目录 | 用途 |
 | --- | --- |
 | `~/Library/Application Support/SkillDock/Library` | 集中收纳并选择性分配给 Agent |
-| `~/.agents/skills` | Codex 和 DeepSeek Harness 自动读取的共享技能 |
+| `~/.agents/skills` | Codex、DeepSeek Harness 和 Mirasim 可用的共享技能 |
 | `~/.agent` 和 `~/.agent/skills` | 其他全局来源 |
 | `~/.agents/archived-skills` | 已归档技能 |
 | `~/.codex/skills` | Codex 技能 |
 | `~/.claude/skills` | Claude Desktop 本地技能，包含 `synced` 子目录 |
 | `~/.dsh/skills` | DeepSeek Harness 技能；配置 `DSH_HOME` 时使用 `$DSH_HOME/skills` |
+| `~/.mirasim/skills` | Mirasim 技能，自带默认技能初始收起 |
 
 ## 开发
 
