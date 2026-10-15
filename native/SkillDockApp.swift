@@ -511,18 +511,6 @@ private final class SkillStore: ObservableObject {
         return roots
     }
 
-    var dotAgentStatus: String {
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: dotAgentPath.path, isDirectory: &isDirectory) else { return L10n.text("未发现 ~/.agent", "~/.agent not found") }
-        guard isDirectory.boolValue else { return L10n.text("~/.agent 是文件，不是技能目录", "~/.agent is a file, not a skills folder") }
-        let nested = dotAgentPath.appending(path: "skills", directoryHint: .isDirectory)
-        var nestedIsDirectory: ObjCBool = false
-        if FileManager.default.fileExists(atPath: nested.path, isDirectory: &nestedIsDirectory), nestedIsDirectory.boolValue {
-            return L10n.text("已发现技能目录（根目录 + skills 子目录）", "Skills found in root and skills subfolder")
-        }
-        return L10n.text("已发现技能目录（根目录）", "Skills found in root folder")
-    }
-
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         language = AppLanguage(rawValue: defaults.string(forKey: "SkillDock.language") ?? "") ?? .simplifiedChinese
@@ -1408,18 +1396,8 @@ private struct ContentView: View {
                     return store.promoteToShared(skill)
                 })
                 .help(L10n.text("拖入技能设为全局：复制到 ~/.agents/skills 并保留原技能", "Drop a skill to make it global: copy to ~/.agents/skills and keep the original"))
-                HStack(spacing: 7) {
-                    Image(systemName: "folder.badge.questionmark").font(.system(size: 13)).foregroundStyle(Palette.amber).frame(width: 14)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("~/.agent").font(.system(size: 12, weight: .medium)).foregroundStyle(Palette.secondary)
-                        HStack(spacing: 4) {
-                            Text(store.dotAgentStatus).font(.system(size: 11)).foregroundStyle(Palette.amber)
-                            if store.dotAgentSkillCount > 0 {
-                                Text(L10n.text("· \(store.dotAgentSkillCount) 个技能", "· \(store.dotAgentSkillCount) skills")).font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.muted)
-                            }
-                        }
-                    }
-                    Spacer()
+                if store.dotAgentSkillCount > 0 {
+                    PathRow(symbol: "folder", label: L10n.text("其他全局", "Other global"), path: L10n.text("~/.agent · \(store.dotAgentSkillCount) 个", "~/.agent · \(store.dotAgentSkillCount)"))
                 }
                 PathRow(symbol: "archivebox", label: L10n.text("归档", "Archived"), path: L10n.text("~/.agents/archived-skills · \(store.archivedSkillCount) 个", "~/.agents/archived-skills · \(store.archivedSkillCount)"), onDrop: { id in
                     guard let skill = store.skills.first(where: { $0.id == id }) else { return false }
@@ -1468,7 +1446,7 @@ private struct ContentView: View {
                     Spacer()
                     Text("\(store.filteredSkills.count)").font(.system(size: 12, weight: .medium, design: .monospaced)).foregroundStyle(Palette.secondary).padding(.horizontal, 7).padding(.vertical, 4).background(Palette.raised, in: Capsule())
                 }
-                Text(L10n.text("全局 \(store.globalSkillCount) · Shared \(store.sharedSkillCount) · 归档 \(store.archivedSkillCount) · ~/.agent \(store.dotAgentSkillCount)", "Global \(store.globalSkillCount) · Shared \(store.sharedSkillCount) · Archived \(store.archivedSkillCount) · ~/.agent \(store.dotAgentSkillCount)"))
+                Text(L10n.text("全局 \(store.globalSkillCount) · Shared \(store.sharedSkillCount) · 归档 \(store.archivedSkillCount)", "Global \(store.globalSkillCount) · Shared \(store.sharedSkillCount) · Archived \(store.archivedSkillCount)"))
                     .font(.system(size: 11)).foregroundStyle(Palette.secondary)
                 Picker(L10n.text("技能来源", "Skill Sources"), selection: $store.filter) {
                     ForEach(SkillFilter.allCases) { Text($0.title).tag($0) }
@@ -2561,7 +2539,9 @@ private struct SettingsSheet: View {
             }
             Divider().overlay(Palette.line)
             SettingsPath(label: "SkillDock Library", path: store.libraryDirectory.path)
-            SettingsPath(label: L10n.text("全局 · ~/.agent", "Global · ~/.agent"), path: "\(store.dotAgentPath.path) · \(store.dotAgentStatus)")
+            if store.dotAgentSkillCount > 0 {
+                SettingsPath(label: L10n.text("其他全局", "Other global"), path: store.dotAgentPath.path)
+            }
             SettingsPath(label: L10n.text("共享全局", "Shared global"), path: store.sharedDirectory.path)
             SettingsPath(label: L10n.text("全局归档", "Archived global"), path: store.archivedDirectory.path)
             ForEach(AgentKind.allCases) { kind in SettingsPath(label: kind.title, path: kind.skillDirectory.path) }
