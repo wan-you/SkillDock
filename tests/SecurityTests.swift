@@ -2,10 +2,11 @@ import Foundation
 
 // App code and this file are combined by run-security-tests.sh, allowing the
 // regression cases to exercise the actual private Store methods. Every home
-// lookup in that build is redirected here, and application discovery is empty.
+// lookup in that build is redirected here, and discovery uses fixture Agents.
 var securityTestHome = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SKILLDOCK_TEST_HOME"]!, isDirectory: true)
 private let securityTestRoot = securityTestHome
 private var checkedAssertions = 0
+private var securityTestAgents: [InstalledAgent] = []
 
 private struct SecurityTestFailure: Error, CustomStringConvertible {
     let description: String
@@ -38,6 +39,7 @@ private func skill(_ store: SkillStore, at path: URL) throws -> SkillItem {
 
 @MainActor
 private func fixture(_ name: String, setup: (URL) throws -> Void = { _ in }, _ body: (SkillStore) throws -> Void) throws {
+    securityTestAgents = []
     securityTestHome = securityTestRoot.appendingPathComponent(name, isDirectory: true)
     try FileManager.default.createDirectory(at: securityTestHome, withIntermediateDirectories: true)
     try setup(securityTestHome)
@@ -532,6 +534,7 @@ private struct SecurityTests {
             }
         }
 
+        try runAgentSkillTests()
         print("Store security regressions passed (\(checkedAssertions) assertions).")
     }
 }

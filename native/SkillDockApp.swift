@@ -75,7 +75,7 @@ private enum AppAppearance: String, CaseIterable, Identifiable {
 }
 
 private enum AgentKind: String, CaseIterable, Identifiable {
-    case codex, claude, deepseek, mirasim
+    case codex, claude, deepseek, mirasim, grok
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -83,6 +83,7 @@ private enum AgentKind: String, CaseIterable, Identifiable {
         case .claude: "Claude Desktop"
         case .deepseek: "DeepSeek Harness"
         case .mirasim: "Mirasim"
+        case .grok: "Grok"
         }
     }
     var subtitle: String {
@@ -91,6 +92,7 @@ private enum AgentKind: String, CaseIterable, Identifiable {
         case .claude: "Anthropic"
         case .deepseek: "DeepSeek"
         case .mirasim: L10n.text("本地 Agent", "Local Agent")
+        case .grok: "xAI"
         }
     }
     var symbol: String {
@@ -99,6 +101,7 @@ private enum AgentKind: String, CaseIterable, Identifiable {
         case .claude: "sparkle"
         case .deepseek: "waveform.path"
         case .mirasim: "circle.hexagongrid"
+        case .grok: "bolt"
         }
     }
     var accent: Color {
@@ -107,14 +110,16 @@ private enum AgentKind: String, CaseIterable, Identifiable {
         case .claude: Palette.claude
         case .deepseek: Palette.blue
         case .mirasim: Palette.amber
+        case .grok: Palette.text
         }
     }
-    var preferredBundleID: String {
+    var preferredBundleID: String? {
         switch self {
         case .codex: "com.openai.codex"
         case .claude: "com.anthropic.claudefordesktop"
         case .deepseek: "com.deepseek.dsh"
         case .mirasim: "ai.mirofish.mirasim"
+        case .grok: nil
         }
     }
     var bundleIDs: Set<String> {
@@ -123,6 +128,7 @@ private enum AgentKind: String, CaseIterable, Identifiable {
         case .claude: ["com.anthropic.claudefordesktop", "com.anthropic.claude"]
         case .deepseek: ["com.deepseek.dsh", "com.deepseek.harness"]
         case .mirasim: ["ai.mirofish.mirasim"]
+        case .grok: []
         }
     }
     var skillDirectory: URL {
@@ -137,6 +143,7 @@ private enum AgentKind: String, CaseIterable, Identifiable {
                 home.appending(path: ".dsh/skills", directoryHint: .isDirectory)
             }
         case .mirasim: home.appending(path: ".mirasim/skills", directoryHint: .isDirectory)
+        case .grok: Self.grokDataDirectory(home: home).appending(path: "skills", directoryHint: .isDirectory)
         }
     }
     var alternateSkillDirectories: [URL] {
@@ -146,19 +153,33 @@ private enum AgentKind: String, CaseIterable, Identifiable {
         case .claude: return [home.appending(path: ".claude/skills/synced", directoryHint: .isDirectory)]
         case .deepseek: return []
         case .mirasim: return []
+        case .grok: return []
         }
     }
-    var loadsSharedSkills: Bool { self == .codex || self == .deepseek || self == .mirasim }
+    static func grokDataDirectory(home: URL) -> URL {
+        if let customHome = ProcessInfo.processInfo.environment["GROK_HOME"], !customHome.isEmpty {
+            return URL(fileURLWithPath: customHome, isDirectory: true)
+        }
+        return home.appending(path: ".grok", directoryHint: .isDirectory)
+    }
+    var loadsSharedSkills: Bool { self == .codex || self == .deepseek || self == .mirasim || self == .grok }
 }
 
 private struct InstalledAgent: Identifiable, Hashable {
     let kind: AgentKind
-    let applicationURL: URL
+    let applicationURL: URL?
     let bundleIdentifier: String
     let applicationName: String
+    var executableURL: URL? = nil
+    var packageRootURL: URL? = nil
     var id: String { kind.id }
+    var detectionURL: URL { applicationURL ?? executableURL ?? kind.skillDirectory }
+    var isCommandLine: Bool { applicationURL == nil && executableURL != nil }
 
     var applicationIcon: NSImage {
+        guard let applicationURL else {
+            return NSImage(systemSymbolName: kind.symbol, accessibilityDescription: kind.title) ?? NSImage(size: NSSize(width: 32, height: 32))
+        }
         // Prefer the bundled full-resolution artwork where it is available.
         // DeepSeek's small ICNS layers decode incorrectly on macOS.
         if kind == .deepseek || kind == .mirasim,
@@ -258,8 +279,14 @@ private enum DefaultSkillCatalog {
         var sources = [DefaultSkillSource(root: home.appending(path: ".codex/skills/.system", directoryHint: .isDirectory), agent: .codex)]
         if let claude = claudeSource(home: home) { sources.append(claude) }
         if let mirasim = mirasimSource(home: home) { sources.append(mirasim) }
+        sources.append(DefaultSkillSource(root: AgentKind.grokDataDirectory(home: home).appending(path: "bundled/skills", directoryHint: .isDirectory), agent: .grok))
         if let deepseek = agents.first(where: { $0.kind == .deepseek }) {
-            sources.append(DefaultSkillSource(root: deepseek.applicationURL.appending(path: "Contents/Resources/runtime/office-skills", directoryHint: .isDirectory), agent: .deepseek))
+            if let app = deepseek.applicationURL {
+                sources.append(DefaultSkillSource(root: app.appending(path: "Contents/Resources/runtime/office-skills", directoryHint: .isDirectory), agent: .deepseek))
+            }
+            if let package = deepseek.packageRootURL {
+                sources.append(DefaultSkillSource(root: package.appending(path: "node_modules/@deepseek-ai/dsh-skill-office/assets", directoryHint: .isDirectory), agent: .deepseek))
+            }
         }
         return sources
     }
@@ -391,8 +418,9 @@ private enum SkillPresentation {
         case .agent(.claude): 4
         case .agent(.deepseek): 5
         case .agent(.mirasim): 6
-        case .archived: 7
-        case .other: 8
+        case .agent(.grok): 7
+        case .archived: 8
+        case .other: 9
         }
     }
 
@@ -857,7 +885,7 @@ private final class SkillStore: ObservableObject {
 
     func managementHint(for skill: SkillItem) -> String {
         if skill.isDefault { return L10n.text("这是 Agent 自带的默认技能，由 Agent 管理；可以复制到 Library 后单独管理。", "This built-in skill is managed by its Agent. Copy it to Library to manage an independent version.") }
-        if skill.origin == .shared { return L10n.text("Shared 技能供 Codex / DeepSeek / Mirasim 读取，请先复制到 Library。", "Shared skills are available to Codex / DeepSeek / Mirasim. Copy this skill to Library to manage it.") }
+        if skill.origin == .shared { return L10n.text("共享全局技能供多个 Agent 读取，可先复制到 Library 后管理。", "Shared global skills are used by multiple Agents. Copy this skill to Library to manage it.") }
         if skill.isManagedSync { return L10n.text("Claude synced 技能由 Claude 管理，不能在这里改动。", "Claude manages its synced skills. They are read-only here.") }
         if !isLocalOrigin(skill.origin) || directSkillRoot(for: skill) == nil || managedSkillState(for: skill) == nil {
             return L10n.text("此来源只读，不能在这里归档或删除。", "This source is read-only and cannot be archived or deleted here.")
@@ -1025,7 +1053,7 @@ private final class SkillStore: ObservableObject {
                 let displayName = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
                     ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
                     ?? appURL.deletingPathExtension().lastPathComponent
-                for kind in AgentKind.allCases where kind.bundleIDs.contains(bundleID) || appURL.lastPathComponent.localizedLowercase.contains(kind.title.localizedLowercase) {
+                for kind in AgentKind.allCases where kind != .grok && (kind.bundleIDs.contains(bundleID) || appURL.lastPathComponent.localizedLowercase.contains(kind.title.localizedLowercase)) {
                     bundles.append((kind, appURL, bundleID, displayName))
                 }
             }
@@ -1043,6 +1071,12 @@ private final class SkillStore: ObservableObject {
             }
         }
         let unique = AgentKind.allCases.compactMap { kind -> InstalledAgent? in
+            let command: AgentCommandInstallation?
+            switch kind {
+            case .deepseek: command = AgentCommandDiscovery.deepseek(home: fm.homeDirectoryForCurrentUser)
+            case .grok: command = AgentCommandDiscovery.grok(home: fm.homeDirectoryForCurrentUser, dataRoot: AgentKind.grokDataDirectory(home: fm.homeDirectoryForCurrentUser))
+            case .codex, .claude, .mirasim: command = nil
+            }
             let matches = bundles.filter { $0.0 == kind }
             let exact = matches.first(where: { $0.2 == kind.preferredBundleID })
                 ?? matches.first(where: { kind.bundleIDs.contains($0.2) })
@@ -1050,8 +1084,11 @@ private final class SkillStore: ObservableObject {
                 let name = candidate.1.deletingPathExtension().lastPathComponent.localizedLowercase
                 return name == kind.title.localizedLowercase || name == kind.title.replacingOccurrences(of: " ", with: "").localizedLowercase
             })
-            guard let found = exact ?? fallback else { return nil }
-            return InstalledAgent(kind: kind, applicationURL: found.1, bundleIdentifier: found.2, applicationName: found.3)
+            if let found = exact ?? fallback {
+                return InstalledAgent(kind: kind, applicationURL: found.1, bundleIdentifier: found.2, applicationName: found.3, executableURL: command?.executableURL, packageRootURL: command?.packageRoot)
+            }
+            guard let command else { return nil }
+            return InstalledAgent(kind: kind, applicationURL: nil, bundleIdentifier: "", applicationName: kind.title, executableURL: command.executableURL, packageRootURL: command.packageRoot)
         }
         return AgentKind.allCases.compactMap { kind in unique.first(where: { $0.kind == kind }) }
     }
@@ -1114,18 +1151,48 @@ private final class SkillStore: ObservableObject {
         var metadata = SkillMetadata()
         var inFrontmatter = false
         var sawOpening = false
-        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false).prefix(120) {
-            let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
-            if line == "---" {
-                if !sawOpening { sawOpening = true; inFrontmatter = true; continue }
-                if inFrontmatter { break }
+        var descriptionStyle: Character?
+        var descriptionIndent = 0
+        var descriptionLines: [String] = []
+        func finishDescription() {
+            guard let style = descriptionStyle else { return }
+            let indentation = descriptionLines.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                .map { $0.prefix(while: { $0 == " " || $0 == "\t" }).count }.min() ?? 0
+            var value = descriptionLines.map { String($0.dropFirst(indentation)) }.joined(separator: "\n")
+            if style == ">" {
+                value = value.replacingOccurrences(of: "(?<!\\n)\\n(?!\\n)", with: " ", options: .regularExpression)
             }
-            guard inFrontmatter, let colon = line.firstIndex(of: ":") else { continue }
+            metadata.description = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            descriptionStyle = nil
+            descriptionLines = []
+        }
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false).prefix(120) {
+            let raw = String(rawLine)
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let indentation = raw.prefix(while: { $0 == " " || $0 == "\t" }).count
+            if line == "---" && (descriptionStyle == nil || indentation <= descriptionIndent) {
+                if !sawOpening { sawOpening = true; inFrontmatter = true; continue }
+                if inFrontmatter { finishDescription(); break }
+            }
+            guard inFrontmatter else { continue }
+            if descriptionStyle != nil {
+                if line.isEmpty || indentation > descriptionIndent {
+                    descriptionLines.append(raw)
+                    continue
+                }
+                finishDescription()
+            }
+            guard let colon = line.firstIndex(of: ":") else { continue }
             let key = String(line[..<colon]).trimmingCharacters(in: .whitespaces).lowercased()
-            let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            let rawValue = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            let value = rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
             switch key {
             case "name": metadata.name = value
-            case "description": metadata.description = value
+            case "description":
+                if [">", ">-", ">+", "|", "|-", "|+"].contains(rawValue) {
+                    descriptionStyle = rawValue.first
+                    descriptionIndent = indentation
+                } else { metadata.description = value }
             case "version": metadata.version = value
             case "alias", "aliases": metadata.aliases.append(contentsOf: parseList(value))
             case "dependencies", "depends_on", "requires", "upstream": metadata.upstreamReferences.append(contentsOf: parseList(value))
@@ -1133,6 +1200,7 @@ private final class SkillStore: ObservableObject {
             default: break
             }
         }
+        finishDescription()
         return metadata
     }
 
@@ -1311,7 +1379,7 @@ private struct ContentView: View {
             .padding(.horizontal, 15).padding(.top, 22).padding(.bottom, 11)
 
             if store.agents.isEmpty {
-                ContentUnavailableView(L10n.text("未发现 Agent", "No Agents found"), systemImage: "app.dashed", description: Text(L10n.text("安装 Codex、Claude Desktop、DeepSeek Harness 或 Mirasim 后，重新扫描即可。", "Install Codex, Claude Desktop, DeepSeek Harness, or Mirasim, then rescan.")))
+                ContentUnavailableView(L10n.text("未发现 Agent", "No Agents found"), systemImage: "app.dashed", description: Text(L10n.text("安装支持的 Agent 后重新扫描；也会检测 Grok 和 DeepSeek Harness 命令行版。", "Install a supported Agent and rescan. Grok and DeepSeek Harness command-line installations are also detected.")))
                     .padding(12).frame(maxHeight: .infinity)
             } else {
                 ScrollView {
@@ -1443,7 +1511,7 @@ private struct ContentView: View {
 
             HStack(spacing: 7) {
                 Image(systemName: "info.circle").foregroundStyle(Palette.muted)
-                Text(L10n.text("技能通过 SKILL.md 识别 · Codex / DeepSeek / Mirasim 可用 Shared", "Skills use SKILL.md · Shared is available to Codex / DeepSeek / Mirasim")).foregroundStyle(Palette.muted)
+                Text(L10n.text("技能通过 SKILL.md 识别 · 拖到共享全局即可共享", "Skills use SKILL.md · Drag to Shared global to share")).foregroundStyle(Palette.muted)
                 Spacer()
                 Button { store.reveal(store.libraryDirectory) } label: { Image(systemName: "arrow.up.forward.app") }
                     .buttonStyle(IconButtonStyle()).help(L10n.text("在 Finder 中打开 SkillDock Library", "Show SkillDock Library in Finder"))
@@ -1467,15 +1535,15 @@ private struct ContentView: View {
                 HStack(alignment: .center, spacing: 12) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 12).fill(agent.kind.accent.opacity(0.13)).frame(width: 40, height: 40)
-                        Image(nsImage: agent.applicationIcon).resizable().interpolation(.high).scaledToFit().frame(width: 24, height: 24).clipShape(RoundedRectangle(cornerRadius: 5))
+                        Image(nsImage: agent.applicationIcon).resizable().interpolation(.high).scaledToFit().frame(width: 24, height: 24).foregroundStyle(agent.kind.accent).clipShape(RoundedRectangle(cornerRadius: 5))
                     }
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 7) {
                             Text(agent.kind.title).font(.system(size: 20, weight: .semibold)).foregroundStyle(Palette.text).lineLimit(1)
                         }
                         HStack(spacing: 7) {
-                            Text(L10n.text("已检测", "Detected")).font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.mint).padding(.horizontal, 6).padding(.vertical, 3).background(Palette.mint.opacity(0.1), in: Capsule())
-                            Text(agent.applicationURL.path).font(.system(size: 12, design: .monospaced)).foregroundStyle(Palette.muted).lineLimit(1).truncationMode(.middle)
+                            Text(agent.isCommandLine ? L10n.text("命令行版", "CLI") : L10n.text("已检测", "Detected")).font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.mint).padding(.horizontal, 6).padding(.vertical, 3).background(Palette.mint.opacity(0.1), in: Capsule())
+                            Text(agent.detectionURL.path).font(.system(size: 12, design: .monospaced)).foregroundStyle(Palette.muted).lineLimit(1).truncationMode(.middle)
                         }
                     }
                     Spacer()
@@ -1602,10 +1670,10 @@ private struct AgentSidebarRow: View {
         Button(action: action) {
             HStack(spacing: 10) {
                 Image(nsImage: agent.applicationIcon)
-                    .resizable().interpolation(.high).scaledToFit().frame(width: 29, height: 29).clipShape(RoundedRectangle(cornerRadius: 7))
+                    .resizable().interpolation(.high).scaledToFit().frame(width: 29, height: 29).foregroundStyle(agent.kind.accent).clipShape(RoundedRectangle(cornerRadius: 7))
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(agent.kind.title).font(.system(size: 13, weight: selected ? .semibold : .medium)).foregroundStyle(selected ? Palette.text : Palette.secondary)
-                    Text(L10n.text("\(skillCount) 个技能 · \(agent.kind.subtitle)", "\(skillCount) skills · \(agent.kind.subtitle)")).font(.system(size: 11)).foregroundStyle(Palette.muted)
+                    Text(agent.kind.title).font(.system(size: 13, weight: selected ? .semibold : .medium)).foregroundStyle(selected ? Palette.text : Palette.secondary).lineLimit(1)
+                    Text(L10n.text("\(skillCount) 个技能 · \(agent.isCommandLine ? "CLI" : agent.kind.subtitle)", "\(skillCount) skills · \(agent.isCommandLine ? "CLI" : agent.kind.subtitle)")).font(.system(size: 11)).foregroundStyle(Palette.muted).lineLimit(1)
                 }
                 Spacer(minLength: 0)
                 Circle().fill(selected ? Palette.mint : Palette.muted.opacity(0.6)).frame(width: 5, height: 5)
@@ -1750,6 +1818,7 @@ private struct SkillSourceRow: View {
         case .agent(.deepseek): Palette.blue
         case .agent(.codex): Palette.mint
         case .agent(.mirasim): Palette.amber
+        case .agent(.grok): Palette.text
         case .other: Palette.secondary
         }
     }
@@ -2493,10 +2562,10 @@ private struct SettingsSheet: View {
             Divider().overlay(Palette.line)
             SettingsPath(label: "SkillDock Library", path: store.libraryDirectory.path)
             SettingsPath(label: L10n.text("全局 · ~/.agent", "Global · ~/.agent"), path: "\(store.dotAgentPath.path) · \(store.dotAgentStatus)")
-            SettingsPath(label: L10n.text("共享 · Codex / DeepSeek / Mirasim", "Shared · Codex / DeepSeek / Mirasim"), path: store.sharedDirectory.path)
+            SettingsPath(label: L10n.text("共享全局", "Shared global"), path: store.sharedDirectory.path)
             SettingsPath(label: L10n.text("全局归档", "Archived global"), path: store.archivedDirectory.path)
             ForEach(AgentKind.allCases) { kind in SettingsPath(label: kind.title, path: kind.skillDirectory.path) }
-            Text(L10n.text("拖到共享全局会复制技能到 ~/.agents/skills，供 Codex、DeepSeek Harness 和 Mirasim 使用。Library 用于集中收纳和选择性分配。Mirasim 的本地技能目录为 ~/.mirasim/skills；Codex 使用 ~/.codex/skills；DeepSeek 默认使用 ~/.dsh/skills。Claude Desktop 的本地技能及 synced 子目录作为本机来源展示。", "Drag to Shared global to copy skills into ~/.agents/skills for Codex, DeepSeek Harness, and Mirasim. Library collects skills for selective assignment. Mirasim uses ~/.mirasim/skills; Codex uses ~/.codex/skills; DeepSeek defaults to ~/.dsh/skills. Claude Desktop’s local skills and synced subfolder are shown as local sources."))
+            Text(L10n.text("拖到共享全局会复制技能到 ~/.agents/skills，供 Codex、DeepSeek Harness、Mirasim 和 Grok 使用。Library 用于集中收纳和选择性分配。DeepSeek Harness 与 Grok 同时支持命令行安装检测。Grok 使用 ~/.grok/skills，可通过 GROK_HOME 指定根目录；DeepSeek 默认使用 ~/.dsh/skills。自带默认技能会单独收起。", "Drag to Shared global to copy skills into ~/.agents/skills for Codex, DeepSeek Harness, Mirasim, and Grok. Library collects skills for selective assignment. DeepSeek Harness and Grok also support command-line installation detection. Grok uses ~/.grok/skills and supports GROK_HOME; DeepSeek defaults to ~/.dsh/skills. Built-in skills are grouped separately."))
                 .font(.system(size: 12)).foregroundStyle(Palette.muted).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Text(L10n.text("当前电脑上的应用自动检测中。远端电脑需要额外的同步连接。", "Apps on this Mac are detected automatically. Remote computers require a separate sync connection."))

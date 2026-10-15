@@ -2,14 +2,15 @@
 
 [English](README.md)
 
-SkillDock 是原生 macOS Agent 技能管理器。自动发现 Codex、Claude Desktop、DeepSeek Harness 和 Mirasim，把技能集中到 Library，再通过拖动分配给需要它们的 Agent。
+SkillDock 是原生 macOS Agent 技能管理器。自动发现 Codex、Claude Desktop、DeepSeek Harness、Mirasim 和 Grok CLI，把技能集中到 Library，再通过拖动分配给需要它们的 Agent。
 
 ![SkillDock](docs/images/skilldock.png)
 
 ## 功能
 
 - **拖动分享**：让多个 Agent 链接同一份技能，或创建可以独立编辑的副本。
-- **设为全局**：把技能拖到「共享全局」，复制到 `~/.agents/skills` 并保留原技能，供 Codex、DeepSeek Harness 和 Mirasim 使用。
+- **设为全局**：把技能拖到「共享全局」，复制到 `~/.agents/skills` 并保留原技能，供 Codex、DeepSeek Harness、Mirasim 和 Grok 使用。
+- **识别命令行 Agent**：自动发现 Grok CLI 原生安装和 DeepSeek Harness npm 命令，与桌面应用一起显示，自带技能默认收起。
 - **查看关系**：悬浮在技能卡片的关系按钮上，用箭头查看技能来源和下游 Agent。
 - **搜索与排序**：搜索名称、说明、别名和路径，按名称、来源或最近修改排序。自带默认技能初始收起。
 - **整理技能**：收纳到 Library，在详情栏归档或删除。
@@ -53,19 +54,22 @@ SkillDock 从包含 `SKILL.md` 的文件夹中发现技能。
 | 目录 | 用途 |
 | --- | --- |
 | `~/Library/Application Support/SkillDock/Library` | 集中收纳并选择性分配给 Agent |
-| `~/.agents/skills` | Codex、DeepSeek Harness 和 Mirasim 可用的共享技能 |
+| `~/.agents/skills` | Codex、DeepSeek Harness、Mirasim 和 Grok 可用的共享技能 |
 | `~/.agent` 和 `~/.agent/skills` | 其他全局来源 |
 | `~/.agents/archived-skills` | 已归档技能 |
 | `~/.codex/skills` | Codex 技能 |
 | `~/.claude/skills` | Claude Desktop 本地技能，包含 `synced` 子目录 |
 | `~/.dsh/skills` | DeepSeek Harness 技能；配置 `DSH_HOME` 时使用 `$DSH_HOME/skills` |
 | `~/.mirasim/skills` | Mirasim 技能，自带默认技能初始收起 |
+| `~/.grok/skills` | Grok 用户技能；配置 `GROK_HOME` 时使用 `$GROK_HOME/skills` |
+| `~/.grok/bundled/skills` | Grok 自带技能，放在收起的默认技能分组中 |
 
 ## 开发
 
 | 文件 | 用途 |
 | --- | --- |
 | `native/SkillDockApp.swift` | SwiftUI 界面、发现和管理技能 |
+| `native/AgentCommandDiscovery.swift` | 只读检测 Grok 和 DeepSeek Harness 命令行安装 |
 | `native/SkillOpenService.swift` | 原生应用打开操作 |
 | `native/SkillFileSafety.swift` | 文件系统身份与元数据读取 |
 | `scripts/build-macos-app.sh` | 构建和签名应用包 |

@@ -7,6 +7,7 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 export SKILLDOCK_TEST_HOME="$TEST_ROOT/home"
 # Ignore an existing DeepSeek override while testing isolated skill locations.
 unset DSH_HOME
+unset GROK_HOME
 
 python3 - "$PROJECT_ROOT" "$TEST_ROOT" <<'PY'
 from pathlib import Path
@@ -17,10 +18,10 @@ project, output = map(Path, sys.argv[1:])
 app = (project / "native/SkillDockApp.swift").read_text()
 app = app.split("@main\n", 1)[0]
 # Keep Store, scanning, policies, and filesystem operations unchanged. Supply
-# only a test home and a deterministic empty installed-application inventory.
+# only a test home and a deterministic installed-command fixture inventory.
 start = app.index("    private func discoverAgents() -> [InstalledAgent] {")
 end = app.index("    private func scanSkills() -> [SkillItem] {", start)
-app = app[:start] + "    private func discoverAgents() -> [InstalledAgent] { [] }\n\n" + app[end:]
+app = app[:start] + "    private func discoverAgents() -> [InstalledAgent] { securityTestAgents }\n\n" + app[end:]
 
 def isolated_home(source):
     return re.sub(r"(?:FileManager\.default|fm|fileManager)\.homeDirectoryForCurrentUser",
@@ -29,7 +30,7 @@ def isolated_home(source):
 app = isolated_home(app)
 opening = isolated_home((project / "native/SkillOpenService.swift").read_text())
 assert "homeDirectoryForCurrentUser" not in app + opening
-(output / "SecurityTests.swift").write_text(app + "\n" + (project / "tests/SecurityTests.swift").read_text())
+(output / "SecurityTests.swift").write_text(app + "\n" + (project / "tests/SecurityTests.swift").read_text() + "\n" + (project / "tests/AgentSkillTests.swift").read_text())
 (output / "SkillOpenService.swift").write_text(opening)
 PY
 
@@ -39,9 +40,17 @@ swiftc -parse-as-library -swift-version 5 \
   -o "$TEST_ROOT/file-safety-tests"
 "$TEST_ROOT/file-safety-tests"
 
+swiftc -parse-as-library -swift-version 5 \
+  "$PROJECT_ROOT/native/SkillFileSafety.swift" \
+  "$PROJECT_ROOT/native/AgentCommandDiscovery.swift" \
+  "$PROJECT_ROOT/tests/CommandDiscoveryTests.swift" \
+  -o "$TEST_ROOT/command-discovery-tests"
+"$TEST_ROOT/command-discovery-tests"
+
 swiftc -parse-as-library -swift-version 5 -framework SwiftUI -framework AppKit \
   "$TEST_ROOT/SecurityTests.swift" \
   "$TEST_ROOT/SkillOpenService.swift" \
   "$PROJECT_ROOT/native/SkillFileSafety.swift" \
+  "$PROJECT_ROOT/native/AgentCommandDiscovery.swift" \
   -o "$TEST_ROOT/security-tests"
 "$TEST_ROOT/security-tests"

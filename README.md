@@ -2,14 +2,15 @@
 
 [简体中文](README.zh-CN.md)
 
-SkillDock is a native macOS app for managing Agent skills. Discover Codex, Claude Desktop, DeepSeek Harness, and Mirasim, collect skills in one Library, and drag them onto the Agents that need them.
+SkillDock is a native macOS app for managing Agent skills. Discover Codex, Claude Desktop, DeepSeek Harness, Mirasim, and Grok CLI, collect skills in one Library, and drag them onto the Agents that need them.
 
 ![SkillDock](docs/images/skilldock.png)
 
 ## Features
 
 - **Drag to share.** Link Agents to the same skill files or create independent copies.
-- **Make skills global.** Drag a skill onto Shared global to copy it into `~/.agents/skills`, keeping the original. Codex, DeepSeek Harness, and Mirasim can use this shared directory.
+- **Make skills global.** Drag a skill onto Shared global to copy it into `~/.agents/skills`, keeping the original. Codex, DeepSeek Harness, Mirasim, and Grok can use this shared directory.
+- **Detect command-line Agents.** Find native Grok CLI installations and DeepSeek Harness npm commands alongside desktop apps. Their bundled skills start collapsed.
 - **See connections.** Hover the relationship button on a skill card to see its sources and downstream Agents, connected by arrows.
 - **Find and organize.** Search names, descriptions, aliases, and paths; sort by name, source, or recent modification. Built-in skills start collapsed.
 - **Manage skills.** Collect skills in the Library, archive them, or delete them from the detail panel.
@@ -53,19 +54,22 @@ Skills are discovered from folders containing `SKILL.md`.
 | Location | Role |
 | --- | --- |
 | `~/Library/Application Support/SkillDock/Library` | Collection for selective assignment to Agents |
-| `~/.agents/skills` | Shared skills available to Codex, DeepSeek Harness, and Mirasim |
+| `~/.agents/skills` | Shared skills available to Codex, DeepSeek Harness, Mirasim, and Grok |
 | `~/.agent` and `~/.agent/skills` | Additional global sources |
 | `~/.agents/archived-skills` | Archived skills |
 | `~/.codex/skills` | Codex skills |
 | `~/.claude/skills` | Claude Desktop local skills, including its `synced` subfolder |
 | `~/.dsh/skills` | DeepSeek Harness skills; uses `$DSH_HOME/skills` when configured |
 | `~/.mirasim/skills` | Mirasim skills; built-in skills start collapsed |
+| `~/.grok/skills` | Grok user skills; uses `$GROK_HOME/skills` when configured |
+| `~/.grok/bundled/skills` | Grok built-in skills, shown in the collapsed default group |
 
 ## Development
 
 | File | Purpose |
 | --- | --- |
 | `native/SkillDockApp.swift` | SwiftUI interface, discovery, and skill management |
+| `native/AgentCommandDiscovery.swift` | Read-only detection of Grok and DeepSeek Harness command installations |
 | `native/SkillOpenService.swift` | Native application opening |
 | `native/SkillFileSafety.swift` | Filesystem identities and metadata reading |
 | `scripts/build-macos-app.sh` | App bundle build and signing |
