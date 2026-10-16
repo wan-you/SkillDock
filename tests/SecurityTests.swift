@@ -53,7 +53,7 @@ private func fixture(_ name: String, setup: (URL) throws -> Void = { _ in }, _ b
 @main
 private struct SecurityTests {
     @MainActor
-    static func main() throws {
+    static func main() async throws {
         let fm = FileManager.default
         try fixture("ordinary-startup") { store in
             try check(exists(store.libraryDirectory), "An ordinary first launch must create Library")
@@ -536,6 +536,7 @@ private struct SecurityTests {
 
         try runAgentSkillTests()
         try runLinkSourceTests()
+        try await runOrganizationStoreTests()
         print("Store security regressions passed (\(checkedAssertions) assertions).")
     }
 }

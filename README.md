@@ -13,6 +13,7 @@ SkillDock is a native macOS app for managing Agent skills. Discover Codex, Claud
 - **Detect command-line Agents.** Find native Grok CLI installations and DeepSeek Harness npm commands alongside desktop apps. Their bundled skills start collapsed.
 - **See connections.** Hover the relationship button on a skill card to see its sources and downstream Agents, connected by arrows.
 - **Find and organize.** Search names, descriptions, aliases, and paths; sort by name, source, or recent modification. Built-in skills start collapsed.
+- **Merge duplicate copies.** Scan for identical skill folders, convert a copy to a symbolic link, or organize all duplicates at once. Keep an existing original, with Shared global preferred over Library and Agent-local copies.
 - **Manage skills.** Collect skills in the Library, archive them, or delete them from the detail panel.
 - **Open your tools.** Open a skill folder in Terminal, VS Code, Codex, or Claude Desktop from its card or detail panel.
 - **Choose your view.** Switch between light, dark, and system appearance, and between English and Simplified Chinese.
@@ -46,6 +47,14 @@ To build elsewhere, pass the destination app path:
 4. Select a skill for its details and management actions. Use **Open**, or right-click its card, to choose an application.
 
 Press **⌘F** to search and **Esc** to clear the query. Use the list sorting menu and the top-bar **Appearance** and **Language** menus to change the view. Sorting, appearance, and language choices are saved.
+
+### Organize copies
+
+Click **Organize** to compare skill files, scripts, and resources; Finder folder-view metadata is ignored. Choose the retained originals and copies, then click **Organize all**. For one skill, right-click its card or use the detail panel and choose **Convert copy to link**. **Scan duplicates** refreshes the results.
+
+The retained original is selected from existing folders in this order: **Shared global → Library → Other global → Agent-local skills**. Folders with different contents stay separate. Organizing replaces editable copies; built-in, managed synced, and archived skills are excluded.
+
+SkillDock saves replaced copies in its application-support folder. Use **Restore last organize** to recover the copies from the latest operation, including after restarting the app.
 
 ## Skill locations
 

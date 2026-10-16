@@ -30,7 +30,7 @@ def isolated_home(source):
 app = isolated_home(app)
 opening = isolated_home((project / "native/SkillOpenService.swift").read_text())
 assert "homeDirectoryForCurrentUser" not in app + opening
-(output / "SecurityTests.swift").write_text(app + "\n" + (project / "tests/SecurityTests.swift").read_text() + "\n" + (project / "tests/AgentSkillTests.swift").read_text() + "\n" + (project / "tests/LinkSourceTests.swift").read_text())
+(output / "SecurityTests.swift").write_text(app + "\n" + (project / "tests/SecurityTests.swift").read_text() + "\n" + (project / "tests/AgentSkillTests.swift").read_text() + "\n" + (project / "tests/LinkSourceTests.swift").read_text() + "\n" + (project / "tests/OrganizationStoreTests.swift").read_text())
 (output / "SkillOpenService.swift").write_text(opening)
 PY
 
@@ -52,5 +52,8 @@ swiftc -parse-as-library -swift-version 5 -framework SwiftUI -framework AppKit \
   "$TEST_ROOT/SkillOpenService.swift" \
   "$PROJECT_ROOT/native/SkillFileSafety.swift" \
   "$PROJECT_ROOT/native/AgentCommandDiscovery.swift" \
+  "$PROJECT_ROOT/native/SkillDuplicateService.swift" \
+  "$PROJECT_ROOT/native/SkillOrganizationSelection.swift" \
+  "$PROJECT_ROOT/native/SkillDuplicateMessages.swift" \
   -o "$TEST_ROOT/security-tests"
 "$TEST_ROOT/security-tests"

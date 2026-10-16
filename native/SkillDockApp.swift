@@ -17,6 +17,10 @@ private enum L10n {
     static func text(_ simplifiedChinese: String, _ english: String) -> String {
         current == .simplifiedChinese ? simplifiedChinese : english
     }
+
+    static func duplicateMessage(_ message: String) -> String {
+        SkillDuplicateMessages.text(message, chinese: current == .simplifiedChinese)
+    }
 }
 
 private enum Palette {
@@ -489,6 +493,17 @@ private final class SkillStore: ObservableObject {
     @Published var expandedDefaultAgents: Set<AgentKind> = []
     @Published var notice: Notice?
     @Published var lastScan = Date()
+    @Published var organizerPresented = false
+    @Published private(set) var duplicateScan: SkillDuplicateScan?
+    @Published private(set) var scanningDuplicates = false
+    @Published private(set) var organizingSkills = false
+    @Published private(set) var restoringOrganization = false
+    @Published private(set) var organizerError: String?
+    @Published private(set) var organizerCompletion: String?
+    @Published private(set) var lastOrganization: SkillOrganizationBatch?
+    @Published private(set) var duplicateFocusID: String?
+    private var duplicateScanTask: Task<SkillDuplicateScan, Error>?
+    private var duplicateScanID = UUID()
     private var timer: AnyCancellable?
     private let defaults: UserDefaults
     private var protectedSkillRoots: [URL] = []
@@ -497,6 +512,9 @@ private final class SkillStore: ObservableObject {
     let dotAgentPath = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".agent", directoryHint: .isDirectory)
     let sharedDirectory = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".agents/skills", directoryHint: .isDirectory)
     let archivedDirectory = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".agents/archived-skills", directoryHint: .isDirectory)
+    var organizationBackupDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Application Support/SkillDock/OrganizationBackups", directoryHint: .isDirectory)
+    }
 
     var dotAgentSkillDirectories: [URL] {
         var isDirectory: ObjCBool = false
@@ -521,6 +539,7 @@ private final class SkillStore: ObservableObject {
         if !isProtectedLocation(libraryDirectory) {
             try? FileManager.default.createDirectory(at: libraryDirectory, withIntermediateDirectories: true)
         }
+        lastOrganization = try? SkillDuplicateService.loadLastBatch(backupRoot: organizationBackupDirectory)
         selectedSkillID = skills.first(where: { $0.origin == .library })?.id ?? skills.first(where: { !$0.isDefault })?.id
         timer = Timer.publish(every: 12, on: .main, in: .common).autoconnect().sink { [weak self] _ in
             Task { @MainActor in self?.refresh() }
@@ -597,6 +616,7 @@ private final class SkillStore: ObservableObject {
     }
 
     func refresh() {
+        guard !organizingSkills else { return }
         agents = discoverAgents()
         openTargetAvailability = Dictionary(uniqueKeysWithValues: SkillOpenTarget.allCases.map { target in
             guard let application = SkillOpenService.applicationURL(for: target) else {
@@ -643,6 +663,7 @@ private final class SkillStore: ObservableObject {
     }
 
     func transfer(_ skill: SkillItem, to kind: AgentKind, mode: TransferMode? = nil) {
+        guard !organizingSkills else { return }
         guard snapshotMatches(skill) else { showChangedSkillNotice(); return }
         let mode = mode ?? transferMode
         let destinationRoot = kind.skillDirectory
@@ -681,6 +702,7 @@ private final class SkillStore: ObservableObject {
     }
 
     func copyToLibrary(_ skill: SkillItem, mode: TransferMode = .copy) {
+        guard !organizingSkills else { return }
         guard snapshotMatches(skill) else { showChangedSkillNotice(); return }
         let destination = libraryDirectory.appending(path: skill.path.lastPathComponent, directoryHint: .isDirectory)
         let fm = FileManager.default
@@ -706,6 +728,7 @@ private final class SkillStore: ObservableObject {
 
     @discardableResult
     func promoteToShared(_ skill: SkillItem) -> Bool {
+        guard !organizingSkills else { return false }
         guard snapshotMatches(skill) else { showChangedSkillNotice(); return false }
         let fm = FileManager.default
         let source = skill.path.resolvingSymlinksInPath().standardizedFileURL
@@ -885,6 +908,7 @@ private final class SkillStore: ObservableObject {
     }
 
     func archive(_ skill: SkillItem) {
+        guard !organizingSkills else { return }
         guard snapshotMatches(skill) else { showChangedSkillNotice(); return }
         guard canArchive(skill) else {
             showNotice(L10n.text("该技能来源不支持归档", "This skill source cannot be archived"), style: .warning)
@@ -910,6 +934,7 @@ private final class SkillStore: ObservableObject {
     }
 
     func delete(_ skill: SkillItem) {
+        guard !organizingSkills else { return }
         guard snapshotMatches(skill) else { showChangedSkillNotice(); return }
         guard canDelete(skill) else {
             showNotice(L10n.text("该技能来源不支持删除", "This skill source cannot be deleted"), style: .warning)
@@ -925,6 +950,136 @@ private final class SkillStore: ObservableObject {
             showNotice(wasLink ? L10n.text("已移除 Agent 中的技能链接", "The skill link was removed from the Agent folder") : L10n.text("\(skill.name) 已永久删除", "\(skill.name) was permanently deleted"), style: .success)
         } catch {
             showNotice(L10n.text("删除失败：\(error.localizedDescription)", "Could not delete the skill: \(error.localizedDescription)"), style: .error)
+        }
+    }
+
+    func canConvertCopy(_ skill: SkillItem) -> Bool {
+        !skill.isSymbolicLink && !skill.isDefault && !skill.isManagedSync && skill.origin != .archived && canDelete(skill)
+    }
+
+    func openOrganizer(for skill: SkillItem? = nil) {
+        guard !organizingSkills else { return }
+        duplicateFocusID = skill?.id
+        organizerPresented = true
+        scanDuplicateCopies()
+    }
+
+    func cancelDuplicateScan() {
+        duplicateScanID = UUID()
+        duplicateScanTask?.cancel()
+        duplicateScanTask = nil
+        scanningDuplicates = false
+    }
+
+    func scanDuplicateCopies() {
+        guard !organizingSkills else { return }
+        cancelDuplicateScan()
+        refresh()
+        duplicateScan = nil
+        organizerError = nil
+        organizerCompletion = nil
+        scanningDuplicates = true
+        let candidates = skills.compactMap { skill -> SkillDuplicateCandidate? in
+            guard !skill.isSymbolicLink, !skill.isDefault, !skill.isManagedSync,
+                  skill.origin != .archived, snapshotMatches(skill) else { return nil }
+            let priority: Int
+            switch skill.origin {
+            case .shared: priority = 0
+            case .library: priority = 10
+            case .dotAgent: priority = 20
+            case .agent(let kind): priority = 30 + (AgentKind.allCases.firstIndex(of: kind) ?? 0)
+            case .other, .archived: return nil
+            }
+            return SkillDuplicateCandidate(id: skill.id, path: skill.path, name: skill.name,
+                location: skill.origin.title, canReplace: canConvertCopy(skill), sourcePriority: priority)
+        }
+        let scanID = duplicateScanID
+        let worker = Task.detached(priority: .userInitiated) {
+            try SkillDuplicateService.scan(candidates: candidates)
+        }
+        duplicateScanTask = worker
+        Task {
+            defer {
+                if duplicateScanID == scanID { scanningDuplicates = false; duplicateScanTask = nil }
+            }
+            do {
+                let result = try await worker.value
+                guard duplicateScanID == scanID else { return }
+                duplicateScan = result
+            } catch is CancellationError {
+            } catch {
+                guard duplicateScanID == scanID else { return }
+                organizerError = L10n.text("扫描失败：", "Scan failed: ") + L10n.duplicateMessage(error.localizedDescription)
+            }
+        }
+    }
+
+    private func organizationStorageIsWritable() -> Bool {
+        let storage = SkillFileSafety.canonicalLocation(at: organizationBackupDirectory).path
+        return !(manageableSkillRoots + protectedSkillRoots).contains {
+            let root = SkillFileSafety.canonicalLocation(at: $0).path
+            return storage == root || storage.hasPrefix(root + "/") || root.hasPrefix(storage + "/")
+        }
+    }
+
+    func organizeCopies(_ entries: [SkillDuplicatePlanEntry]) {
+        guard !organizingSkills, !scanningDuplicates, !entries.isEmpty else { return }
+        refresh()
+        guard organizationStorageIsWritable(), entries.allSatisfy({ entry in
+            guard let copy = skills.first(where: { $0.id == entry.copy.id }), canConvertCopy(copy),
+                  let source = skills.first(where: { $0.id == entry.source.id }),
+                  !source.isSymbolicLink, !source.isDefault, !source.isManagedSync, source.origin != .archived else { return false }
+            return snapshotMatches(copy) && snapshotMatches(source)
+        }) else {
+            organizerError = L10n.text("技能目录已变化，请重新扫描后再整理。", "Skill folders changed. Scan again before organizing.")
+            return
+        }
+        organizingSkills = true
+        organizerError = nil
+        organizerCompletion = nil
+        let backupRoot = organizationBackupDirectory
+        Task {
+            do {
+                let batch = try await Task.detached(priority: .userInitiated) {
+                    try SkillDuplicateService.convert(entries: entries, backupRoot: backupRoot)
+                }.value
+                lastOrganization = batch
+                duplicateScan = nil
+                duplicateFocusID = nil
+                organizerCompletion = L10n.text("已将 \(batch.records.count) 份副本改为软链接", "Converted \(batch.records.count) copies to links")
+                showNotice(organizerCompletion!, style: .success)
+            } catch {
+                organizerError = L10n.text("整理失败：", "Could not organize: ") + L10n.duplicateMessage(error.localizedDescription)
+                lastOrganization = try? SkillDuplicateService.loadLastBatch(backupRoot: backupRoot)
+            }
+            organizingSkills = false
+            refresh()
+        }
+    }
+
+    func restoreLastOrganization() {
+        guard !organizingSkills, !scanningDuplicates, let batch = lastOrganization,
+              batch.restoredAt == nil, organizationStorageIsWritable() else { return }
+        organizingSkills = true
+        restoringOrganization = true
+        organizerError = nil
+        organizerCompletion = nil
+        let backupRoot = organizationBackupDirectory
+        Task {
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try SkillDuplicateService.restore(batch: batch, backupRoot: backupRoot)
+                }.value
+                lastOrganization = try? SkillDuplicateService.loadLastBatch(backupRoot: backupRoot)
+                duplicateScan = nil
+                organizerCompletion = L10n.text("已恢复整理前的独立副本", "Restored the independent copies")
+                showNotice(organizerCompletion!, style: .success)
+            } catch {
+                organizerError = L10n.text("恢复失败：", "Could not restore: ") + L10n.duplicateMessage(error.localizedDescription)
+            }
+            organizingSkills = false
+            restoringOrganization = false
+            refresh()
         }
     }
 
@@ -1335,6 +1490,9 @@ private struct ContentView: View {
         }
         .animation(.snappy(duration: 0.22), value: store.notice?.id)
         .sheet(isPresented: $showSettings) { SettingsSheet().environmentObject(store) }
+        .sheet(isPresented: $store.organizerPresented, onDismiss: { store.cancelDuplicateScan() }) {
+            SkillOrganizerSheet().environmentObject(store)
+        }
         .environment(\.locale, store.language.locale)
     }
 
@@ -1348,7 +1506,7 @@ private struct ContentView: View {
                 Text("SkillDock").font(.system(size: 16, weight: .semibold, design: .rounded)).foregroundStyle(Palette.text)
                 Text(L10n.text("本机技能管理", "LOCAL SKILL MANAGEMENT")).font(.system(size: 11, weight: .semibold, design: .monospaced)).tracking(1.15).foregroundStyle(Palette.muted)
             }
-            searchField.frame(width: 280)
+            searchField.frame(width: 240)
             Spacer()
             HStack(spacing: 8) {
                 Circle().fill(Palette.mint).frame(width: 6, height: 6)
@@ -1359,6 +1517,14 @@ private struct ContentView: View {
                 Label(L10n.text("重新扫描", "Rescan"), systemImage: "arrow.clockwise").font(.system(size: 13, weight: .medium))
             }
             .buttonStyle(QuietButtonStyle())
+            Button { store.openOrganizer() } label: {
+                Label(L10n.text("整理", "Organize"), systemImage: "square.stack.3d.up")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .buttonStyle(QuietButtonStyle())
+            .disabled(store.organizingSkills)
+            .help(L10n.text("扫描重复副本并整理为软链接", "Scan duplicate copies and organize them as links"))
+            .accessibilityLabel(L10n.text("整理技能", "Organize skills"))
             Menu {
                 Picker(L10n.text("外观", "Appearance"), selection: $appearance) {
                     ForEach(AppAppearance.allCases) { option in
@@ -2369,6 +2535,13 @@ private struct SkillOpenMenuItems: View {
             }
             .disabled(availability != .available || store.openingSkillIDs.contains(skill.id))
         }
+        if store.canConvertCopy(skill) {
+            Divider()
+            Button { store.openOrganizer(for: skill) } label: {
+                Label(L10n.text("副本改软链接…", "Convert copy to link…"), systemImage: "link")
+            }
+            .disabled(store.organizingSkills)
+        }
     }
 
     private func title(for target: SkillOpenTarget, availability: SkillOpenAvailability) -> String {
@@ -2466,6 +2639,13 @@ private struct SkillInspector: View {
 
                 Divider().overlay(Palette.line).padding(.vertical, 17)
                 Text(L10n.text("管理技能", "Manage Skill")).font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.secondary)
+                if store.canConvertCopy(skill) {
+                    Button { store.openOrganizer(for: skill) } label: {
+                        Label(L10n.text("副本改软链接…", "Convert copy to link…"), systemImage: "link")
+                    }
+                    .buttonStyle(SecondaryButtonStyle()).padding(.top, 9)
+                    .disabled(store.organizingSkills)
+                }
                 if store.canArchive(skill) || store.canDelete(skill) {
                     HStack(spacing: 7) {
                         if store.canArchive(skill) {
@@ -2585,6 +2765,256 @@ private struct NoticeToast: View {
     }
     private var color: Color {
         switch notice.style { case .success: Palette.mint; case .warning: Palette.amber; case .error: Palette.danger }
+    }
+}
+
+private struct SkillOrganizerSheet: View {
+    @EnvironmentObject private var store: SkillStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var selection = SkillOrganizationSelection()
+    @State private var showSkipped = false
+
+    private var busy: Bool { store.scanningDuplicates || store.organizingSkills }
+    private var groups: [SkillDuplicateGroup] {
+        let all = store.duplicateScan?.groups ?? []
+        guard let focus = store.duplicateFocusID else { return all }
+        return all.filter { ([$0.source] + $0.copies).contains { $0.id == focus } }
+    }
+    private var plan: [SkillDuplicatePlanEntry] {
+        selection.entries(in: groups, focusID: store.duplicateFocusID)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider().overlay(Palette.line)
+            if store.scanningDuplicates || store.organizingSkills {
+                progress
+            } else if let completion = store.organizerCompletion {
+                completionView(completion)
+            } else {
+                results
+            }
+            if let error = store.organizerError {
+                Label(error, systemImage: "exclamationmark.circle")
+                    .font(.system(size: 12)).foregroundStyle(Palette.danger)
+                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 24).padding(.vertical, 12)
+            }
+            Divider().overlay(Palette.line)
+            footer
+        }
+        .frame(width: 820, height: 650)
+        .background(Palette.panel)
+        .interactiveDismissDisabled(store.organizingSkills)
+        .onAppear { resetSelection() }
+        .onChange(of: store.duplicateScan?.groups.map(\.id)) { _, _ in resetSelection() }
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "square.stack.3d.up")
+                .font(.system(size: 23, weight: .medium)).foregroundStyle(Palette.mint)
+                .frame(width: 46, height: 46)
+                .background(Palette.mint.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+            VStack(alignment: .leading, spacing: 6) {
+                Text(store.duplicateFocusID == nil ? L10n.text("整理技能", "Organize skills") : L10n.text("副本改软链接", "Convert copy to link"))
+                    .font(.system(size: 23, weight: .semibold)).foregroundStyle(Palette.text)
+                Text(L10n.text("保留现有原件，将内容相同的副本链接到原件。", "Keep an existing original and link identical copies to it."))
+                    .font(.system(size: 13)).foregroundStyle(Palette.secondary)
+            }
+            Spacer(minLength: 10)
+            Button { dismiss() } label: { Image(systemName: "xmark") }
+                .buttonStyle(IconButtonStyle()).disabled(store.organizingSkills)
+                .help(L10n.text("关闭", "Close"))
+        }
+        .padding(24)
+    }
+
+    private var progress: some View {
+        VStack(spacing: 15) {
+            ProgressView().controlSize(.large)
+            Text(store.restoringOrganization ? L10n.text("正在恢复副本…", "Restoring copies…") : (store.organizingSkills ? L10n.text("正在整理技能…", "Organizing skills…") : L10n.text("正在扫描重复副本…", "Scanning duplicate copies…")))
+                .font(.system(size: 17, weight: .medium)).foregroundStyle(Palette.text)
+            Text(store.restoringOrganization ? L10n.text("恢复整理前的独立技能目录", "Restoring independent skill folders") : (store.organizingSkills ? L10n.text("保存原副本并更新链接", "Saving copies and updating links") : L10n.text("比较文件内容、目录结构与可执行权限", "Comparing file contents, folder structure, and executable permissions")))
+                .font(.system(size: 13)).foregroundStyle(Palette.muted)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var results: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                if let scan = store.duplicateScan {
+                    HStack(spacing: 10) {
+                        Label(L10n.text("\(groups.count) 组重复", "\(groups.count) duplicate groups"), systemImage: "square.on.square")
+                        Text("·").foregroundStyle(Palette.muted)
+                        Text(L10n.text("\(plan.count) 份待整理", "\(plan.count) copies selected"))
+                        Spacer()
+                        Text(L10n.text("已扫描 \(scan.scannedCount) 项", "\(scan.scannedCount) scanned"))
+                            .foregroundStyle(Palette.muted)
+                    }
+                    .font(.system(size: 13, weight: .medium)).foregroundStyle(Palette.secondary)
+                    if store.duplicateFocusID != nil {
+                        Button(L10n.text("查看全部重复副本", "Show all duplicate copies")) { store.openOrganizer() }
+                            .buttonStyle(QuietButtonStyle())
+                    }
+                    if groups.isEmpty {
+                        VStack(spacing: 12) {
+                            Image(systemName: "checkmark.circle").font(.system(size: 35, weight: .light)).foregroundStyle(Palette.mint)
+                            Text(store.duplicateFocusID == nil ? L10n.text("没有发现内容相同的独立副本", "No identical independent copies found") : L10n.text("没有发现与这个技能内容相同的其他原件", "No identical original found for this skill"))
+                                .font(.system(size: 16, weight: .medium)).foregroundStyle(Palette.text)
+                        }
+                        .frame(maxWidth: .infinity).padding(.vertical, 45)
+                    } else {
+                        ForEach(groups) { group in
+                            DuplicateGroupCard(group: group, sourceID: selection.sourceIDs[group.id] ?? group.source.id, focusID: store.duplicateFocusID,
+                                selectedCopies: selection.copyIDs,
+                                chooseSource: { selection.chooseSource($0, in: group, focusID: store.duplicateFocusID) },
+                                toggleCopy: { selection.toggleCopy($0, selected: $1) })
+                        }
+                    }
+                    if !scan.skipped.isEmpty {
+                        DisclosureGroup(isExpanded: $showSkipped) {
+                            ForEach(Array(scan.skipped.enumerated()), id: \.offset) { _, item in
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(compactPath(item.path)).foregroundStyle(Palette.secondary).textSelection(.enabled)
+                                    Text(L10n.duplicateMessage(item.reason)).foregroundStyle(Palette.muted)
+                                }
+                                .font(.system(size: 11)).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 5)
+                            }
+                        } label: {
+                            Text(L10n.text("\(scan.skipped.count) 项未参与比较", "\(scan.skipped.count) items skipped"))
+                                .font(.system(size: 12)).foregroundStyle(Palette.muted)
+                        }
+                        .tint(Palette.mint).padding(.top, 4)
+                    }
+                }
+            }
+            .padding(24)
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    private func completionView(_ message: String) -> some View {
+        VStack(spacing: 15) {
+            Image(systemName: "checkmark.circle.fill").font(.system(size: 45)).foregroundStyle(Palette.mint)
+            Text(message).font(.system(size: 20, weight: .semibold)).foregroundStyle(Palette.text)
+            Text(L10n.text("原件与 Agent 中的技能入口保持在现有位置。", "Originals and Agent skill entries stay in their existing locations."))
+                .font(.system(size: 13)).foregroundStyle(Palette.secondary)
+            Button { store.reveal(store.organizationBackupDirectory) } label: {
+                Label(L10n.text("查看整理备份", "Show organization backups"), systemImage: "folder")
+            }.buttonStyle(QuietButtonStyle())
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var footer: some View {
+        HStack(spacing: 10) {
+            if let last = store.lastOrganization, last.restoredAt == nil {
+                Button { store.restoreLastOrganization() } label: {
+                    Label(L10n.text("撤销上次整理", "Restore last organize"), systemImage: "arrow.uturn.backward")
+                }
+                .buttonStyle(QuietButtonStyle()).disabled(busy)
+            }
+            Spacer(minLength: 10)
+            Button { store.scanDuplicateCopies() } label: {
+                Label(L10n.text("扫描重复副本", "Scan duplicates"), systemImage: "magnifyingglass")
+            }
+            .buttonStyle(SecondaryButtonStyle()).disabled(busy)
+            if store.organizerCompletion != nil {
+                Button(L10n.text("完成", "Done")) { dismiss() }.buttonStyle(AccentButtonStyle())
+                    .keyboardShortcut(.defaultAction).disabled(busy)
+            } else {
+                Button {
+                    store.organizeCopies(plan)
+                } label: {
+                    Text(store.duplicateFocusID == nil ? L10n.text("一键整理（\(plan.count)）", "Organize all (\(plan.count))") : L10n.text("改为软链接（\(plan.count)）", "Convert to link (\(plan.count))"))
+                }
+                .buttonStyle(AccentButtonStyle()).disabled(busy || plan.isEmpty)
+            }
+        }
+        .padding(.horizontal, 24).padding(.vertical, 18)
+    }
+
+    private func resetSelection() {
+        selection = SkillOrganizationSelection(groups: groups, focusID: store.duplicateFocusID)
+    }
+
+}
+
+private func compactPath(_ path: URL) -> String {
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    return path.path.hasPrefix(home + "/") ? "~" + path.path.dropFirst(home.count) : path.path
+}
+
+private struct DuplicateGroupCard: View {
+    let group: SkillDuplicateGroup
+    let sourceID: String
+    let focusID: String?
+    let selectedCopies: Set<String>
+    let chooseSource: (SkillDuplicateCandidate) -> Void
+    let toggleCopy: (String, Bool) -> Void
+
+    private var members: [SkillDuplicateCandidate] { [group.source] + group.copies }
+    private var source: SkillDuplicateCandidate { members.first { $0.id == sourceID } ?? group.source }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(source.name).font(.system(size: 16, weight: .semibold)).foregroundStyle(Palette.text)
+                Spacer()
+                Menu {
+                    ForEach(members.filter { $0.id != focusID }) { item in
+                        Button { chooseSource(item) } label: {
+                            Text("\(item.id == source.id ? "✓ " : "")\(item.location) · \(compactPath(item.path))")
+                        }
+                    }
+                } label: {
+                    Label(L10n.text("选择原件", "Choose original"), systemImage: "arrow.triangle.branch")
+                        .font(.system(size: 12)).foregroundStyle(Palette.secondary)
+                }
+                .menuStyle(.borderlessButton).fixedSize()
+            }
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: "doc.text.fill").foregroundStyle(Palette.mint).frame(width: 18)
+                location(source)
+                Spacer()
+                Text(L10n.text("保留原件", "Keep original")).font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.mint)
+            }
+            .padding(12).background(Palette.mint.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
+            ForEach(members.filter { $0.id != source.id }) { copy in
+                HStack(alignment: .top, spacing: 9) {
+                    if copy.canReplace && (focusID == nil || copy.id == focusID) {
+                        Toggle(isOn: Binding(get: { selectedCopies.contains(copy.id) }, set: { toggleCopy(copy.id, $0) })) {
+                            location(copy)
+                        }
+                        .toggleStyle(.checkbox).tint(Palette.mint)
+                        .accessibilityLabel(L10n.text("将 \(copy.location) 的 \(copy.name) 改为软链接", "Convert \(copy.name) in \(copy.location) to a link"))
+                        Spacer(minLength: 8)
+                        Label(L10n.text("改软链接", "Link to original"), systemImage: "arrow.up")
+                            .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                    } else {
+                        Image(systemName: "lock").foregroundStyle(Palette.muted).frame(width: 18)
+                        location(copy)
+                        Spacer()
+                        Text(L10n.text("保留", "Keep")).font(.system(size: 11)).foregroundStyle(Palette.muted)
+                    }
+                }
+                .padding(.horizontal, 12).padding(.vertical, 4)
+            }
+        }
+        .padding(16)
+        .background(Palette.canvas, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.lineStrong, lineWidth: 1))
+    }
+
+    private func location(_ item: SkillDuplicateCandidate) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(item.location).font(.system(size: 13, weight: .medium)).foregroundStyle(Palette.secondary)
+            Text(compactPath(item.path)).font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.muted)
+                .textSelection(.enabled).lineLimit(2).truncationMode(.middle)
+        }
     }
 }
 
