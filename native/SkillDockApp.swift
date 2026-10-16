@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Combine
+import Darwin
 
 private enum AppLanguage: String, CaseIterable, Identifiable {
     case simplifiedChinese = "zh_CN"
@@ -927,8 +928,53 @@ private final class SkillStore: ObservableObject {
         }
     }
 
+    func linkedSourcePath(for skill: SkillItem) -> URL? {
+        guard skill.isSymbolicLink,
+              let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: skill.path.path),
+              !destination.isEmpty else { return nil }
+        // Relative targets are resolved from the physical parent of the link.
+        // Preserve the final entry so a link to another Agent link keeps that
+        // Agent as its direct source rather than skipping to the end of a chain.
+        let parent = skill.path.deletingLastPathComponent().resolvingSymlinksInPath()
+        let target = URL(fileURLWithPath: destination, relativeTo: parent).absoluteURL.standardizedFileURL
+        let components = destination.split(separator: "/")
+        guard components.contains("..") || components.last == "." else { return target }
+
+        // `alias/..` must walk the physical alias before moving up. URL
+        // standardization alone removes those components in the wrong order.
+        let rawTarget = destination.hasPrefix("/") ? destination : parent.path + "/" + destination
+        let isParentEntry = components.last == "." || components.last == ".."
+        let rawParent = isParentEntry ? rawTarget : (rawTarget as NSString).deletingLastPathComponent
+        guard let resolved = realpath(rawParent, nil) else { return target }
+        defer { free(resolved) }
+        let physicalParent = URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+        if isParentEntry { return physicalParent }
+        // Keep an explicit Agent root alias when it names the same entry.
+        if physicalParent.path == SkillFileSafety.canonicalLocation(at: target.deletingLastPathComponent()).path { return target }
+        return physicalParent.appending(path: target.lastPathComponent, directoryHint: .isDirectory)
+    }
+
+    private func linkedSourceSkill(at target: URL) -> SkillItem? {
+        let targetPath = target.standardizedFileURL.path
+        if let exact = skills.first(where: { $0.path.standardizedFileURL.path == targetPath }) { return exact }
+        // Normalize parent aliases only, without following the final link.
+        let parent = SkillFileSafety.canonicalLocation(at: target.deletingLastPathComponent())
+        let entryPath = parent.appending(path: target.lastPathComponent).path
+        return skills.first { item in
+            guard let snapshot = item.filesystemSnapshot else { return false }
+            return URL(fileURLWithPath: snapshot.parentPath, isDirectory: true)
+                .appending(path: item.path.lastPathComponent).path == entryPath
+        }
+    }
+
+    func installedSkillSubtitle(_ skill: SkillItem) -> String {
+        guard skill.isSymbolicLink else { return skill.path.path }
+        guard let target = linkedSourcePath(for: skill) else { return L10n.text("技能链接", "Skill link") }
+        let source = linkedSourceSkill(at: target)?.origin.title ?? shortPath(target)
+        return L10n.text("链接自 \(source)", "Linked from \(source)")
+    }
+
     func relationships(for skill: SkillItem) -> SkillRelationships {
-        let currentCanonical = canonicalPath(skill.path)
         var upstream: [SkillRelationNode] = []
         var downstream: [SkillRelationNode] = []
         var upstreamIDs = Set<String>()
@@ -949,11 +995,20 @@ private final class SkillStore: ObservableObject {
             downstream.append(SkillRelationNode(id: id, title: kind.title, detail: detail ?? shortPath(kind.skillDirectory), symbol: "arrow.right"))
         }
 
-        // A symbolic link is a real source → destination relationship. Copies remain independent.
-        if skill.isSymbolicLink {
-            for candidate in skills where !candidate.isSymbolicLink && canonicalPath(candidate.path) == currentCanonical { addUpstream(candidate) }
+        // Direct targets define direction. Links sharing a final source are
+        // peers, and a chain retains each intermediate skill.
+        if let target = linkedSourcePath(for: skill) {
+            if let source = linkedSourceSkill(at: target) {
+                addUpstream(source)
+            } else {
+                upstream.append(SkillRelationNode(id: "path:\(target.path)", title: target.lastPathComponent, detail: shortPath(target), symbol: "arrow.right"))
+            }
         }
-        for candidate in skills where candidate.isSymbolicLink && canonicalPath(candidate.path) == currentCanonical { addDownstream(candidate) }
+        for candidate in skills where candidate.isSymbolicLink {
+            if let target = linkedSourcePath(for: candidate), linkedSourceSkill(at: target)?.id == skill.id {
+                addDownstream(candidate)
+            }
+        }
 
         for reference in skill.upstreamReferences {
             for target in resolve(reference, using: aliasMap) { addUpstream(target) }
@@ -1010,8 +1065,12 @@ private final class SkillStore: ObservableObject {
     }
 
     private func shortPath(_ url: URL) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return url.path.hasPrefix(home) ? "~" + url.path.dropFirst(home.count) : url.path
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let path = url.standardizedFileURL.path
+        for root in [home.standardizedFileURL.path, SkillFileSafety.canonicalLocation(at: home).path] {
+            if path == root || path.hasPrefix(root + "/") { return "~" + path.dropFirst(root.count) }
+        }
+        return path
     }
 
     func remove(_ skill: SkillItem) {
@@ -1107,8 +1166,12 @@ private final class SkillStore: ObservableObject {
         var results: [SkillItem] = []
         var seen = Set<String>()
         for (root, origin) in roots {
-            guard let children = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) else { continue }
-            for folder in children {
+            // Enumerate through a directory alias while retaining the original
+            // root in each item's identity and Agent ownership.
+            let scanRoot = root.resolvingSymlinksInPath()
+            guard let children = try? fm.contentsOfDirectory(at: scanRoot, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) else { continue }
+            for child in children {
+                let folder = root.appending(path: child.lastPathComponent, directoryHint: .isDirectory)
                 if let source = defaults.first(where: { $0.protectsWholeRoot && $0.root.standardizedFileURL == root.standardizedFileURL }),
                    let allowed = source.allowedFolders, !allowed.contains(folder.lastPathComponent) { continue }
                 var isDirectory: ObjCBool = false
@@ -2243,7 +2306,7 @@ private struct InstalledSkillRow: View {
                     Image(systemName: skill.isSymbolicLink ? "link" : "doc.text.fill").font(.system(size: 15)).foregroundStyle(Palette.mint).frame(width: 28, height: 28).background(Palette.mint.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
                     VStack(alignment: .leading, spacing: 4) {
                         Text(skill.name).font(.system(size: 14, weight: .semibold)).foregroundStyle(Palette.text).lineLimit(1)
-                        Text(skill.isSymbolicLink ? L10n.text("链接自 \(skill.origin.title)", "Linked from \(skill.origin.title)") : skill.path.path).font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.muted).lineLimit(1).truncationMode(.middle)
+                        Text(store.installedSkillSubtitle(skill)).font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.muted).lineLimit(1).truncationMode(.middle)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -2348,6 +2411,7 @@ private struct SkillInspector: View {
     let skill: SkillItem
     @State private var managementPrompt: SkillManagementPrompt?
     var body: some View {
+        let sourcePath = store.linkedSourcePath(for: skill) ?? skill.path
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 ZStack {
@@ -2374,7 +2438,7 @@ private struct SkillInspector: View {
                 .padding(.top, 16)
 
                 Divider().overlay(Palette.line).padding(.vertical, 17)
-                InspectorField(title: L10n.text("来源路径", "SOURCE PATH"), value: skill.path.path, mono: true, copy: { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(skill.path.path, forType: .string); store.showNotice(L10n.text("路径已复制", "Path copied"), style: .success) })
+                InspectorField(title: L10n.text("来源路径", "SOURCE PATH"), value: sourcePath.path, mono: true, copy: { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(sourcePath.path, forType: .string); store.showNotice(L10n.text("路径已复制", "Path copied"), style: .success) })
                 InspectorField(title: L10n.text("技能文件", "SKILL FILE"), value: "SKILL.md", mono: true, copy: { store.reveal(skill.path.appending(path: "SKILL.md")) })
                     .padding(.top, 14)
                 InspectorField(title: L10n.text("目录内容", "CONTENTS"), value: L10n.text("\(skill.skillCount) 个项目", "\(skill.skillCount) items"), mono: false, copy: nil).padding(.top, 14)

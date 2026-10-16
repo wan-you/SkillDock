@@ -535,6 +535,7 @@ private struct SecurityTests {
         }
 
         try runAgentSkillTests()
+        try runLinkSourceTests()
         print("Store security regressions passed (\(checkedAssertions) assertions).")
     }
 }
