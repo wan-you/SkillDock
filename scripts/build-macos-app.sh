@@ -11,6 +11,7 @@ swiftc -parse-as-library -swift-version 5 -O \
   "$PROJECT_ROOT"/native/*.swift \
   -o "$MACOS/SkillDock"
 cp "$PROJECT_ROOT/native/Resources/SkillDock.icns" "$CONTENTS/Resources/SkillDock.icns"
+cp "$PROJECT_ROOT/native/Resources/DeepSeek.svg" "$PROJECT_ROOT/native/Resources/Grok.svg" "$CONTENTS/Resources/"
 cat > "$CONTENTS/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

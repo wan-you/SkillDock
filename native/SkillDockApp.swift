@@ -183,6 +183,16 @@ private struct InstalledAgent: Identifiable, Hashable {
 
     var applicationIcon: NSImage {
         guard let applicationURL else {
+            // Command-line installs ship no app icon, so use the bundled brand marks.
+            let bundledIcon: String? = switch kind {
+            case .deepseek: "DeepSeek"
+            case .grok: "Grok"
+            default: nil
+            }
+            if let bundledIcon, let url = Bundle.main.url(forResource: bundledIcon, withExtension: "svg"),
+               let image = NSImage(contentsOf: url) {
+                return image
+            }
             return NSImage(systemSymbolName: kind.symbol, accessibilityDescription: kind.title) ?? NSImage(size: NSSize(width: 32, height: 32))
         }
         // Prefer the bundled full-resolution artwork where it is available.
