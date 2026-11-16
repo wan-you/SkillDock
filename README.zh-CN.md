@@ -56,6 +56,15 @@ open "$HOME/Desktop/SkillDock.app"
 
 SkillDock 会将替换下来的副本备份到应用支持目录。点击「撤销上次整理」即可恢复最近一次操作中的副本，重启应用后仍可恢复。
 
+## 作为 Agent 技能使用
+
+`skill/skilldock` 把 SkillDock 的操作打包成一个技能，Codex、Claude、DeepSeek Harness、Mirasim 和 Grok 不打开界面也能用：按 Agent 列出技能、以链接或副本分享、设为全局、归档、查找重复。把这个文件夹链接或复制到 Agent 的技能目录即可安装：
+
+```sh
+ln -s "$PWD/skill/skilldock" ~/.agents/skills/skilldock
+ln -s ../../.agents/skills/skilldock ~/.claude/skills/skilldock
+```
+
 ## 技能目录
 
 SkillDock 从包含 `SKILL.md` 的文件夹中发现技能。

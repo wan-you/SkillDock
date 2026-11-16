@@ -56,6 +56,15 @@ The retained original is selected from existing folders in this order: **Shared 
 
 SkillDock saves replaced copies in its application-support folder. Use **Restore last organize** to recover the copies from the latest operation, including after restarting the app.
 
+## Use as an Agent skill
+
+`skill/skilldock` packages SkillDock's operations as a skill that Codex, Claude, DeepSeek Harness, Mirasim, or Grok can run without the GUI: list skills per Agent, share by link or copy, make a skill global, archive, and find duplicates. Install it by linking or copying the folder into an Agent's skills directory:
+
+```sh
+ln -s "$PWD/skill/skilldock" ~/.agents/skills/skilldock
+ln -s ../../.agents/skills/skilldock ~/.claude/skills/skilldock
+```
+
 ## Skill locations
 
 Skills are discovered from folders containing `SKILL.md`.
